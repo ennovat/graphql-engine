@@ -20,7 +20,7 @@ where
 import Data.Aeson (ToJSON (..))
 import Data.Bifunctor
 import Data.Containers.ListUtils
-import Data.HashMap.Strict.InsOrd qualified as OMap
+import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.List (intersperse)
 import Data.List.NonEmpty qualified as NE
 import Data.String
@@ -31,6 +31,7 @@ import Data.Text.Lazy.Builder qualified as LT
 import Data.Tuple
 import Data.Vector qualified as V
 import Hasura.Backends.BigQuery.Types
+import Hasura.NativeQuery.Metadata (InterpolatedItem (..), InterpolatedQuery (..))
 import Hasura.Prelude hiding (second)
 
 --------------------------------------------------------------------------------
@@ -42,7 +43,7 @@ data Printer
   | NewlinePrinter
   | UnsafeTextPrinter Text
   | IndentPrinter Int Printer
-  | ValuePrinter Value
+  | ValuePrinter TypedValue
   deriving (Show, Eq)
 
 instance IsString Printer where
@@ -67,12 +68,12 @@ fromExpression =
   \case
     CastExpression e scalarType ->
       "CAST(" <+> fromExpression e <+> " AS " <+> fromScalarType scalarType <+> ")"
-    InExpression e value ->
-      "(" <+> fromExpression e <+> ") IN UNNEST(" <+> fromValue value <+> ")"
+    InExpression e (TypedValue ty val) ->
+      "(" <+> fromExpression e <+> ") IN UNNEST(" <+> fromValue ty val <+> ")"
     JsonQueryExpression e -> "JSON_QUERY(" <+> fromExpression e <+> ")"
     JsonValueExpression e path ->
       "JSON_VALUE(" <+> fromExpression e <+> fromPath path <+> ")"
-    ValueExpression value -> fromValue value
+    ValueExpression (TypedValue ty val) -> fromValue ty val
     AndExpression xs ->
       SepByPrinter
         (NewlinePrinter <+> "AND ")
@@ -105,18 +106,23 @@ fromExpression =
       "(" <+> fromExpression x <+> ") != (" <+> fromExpression y <+> ")"
     ToStringExpression e -> "CONCAT(" <+> fromExpression e <+> ", '')"
     SelectExpression s -> "(" <+> IndentPrinter 1 (fromSelect s) <+> ")"
-    ListExpression xs -> " UNNEST ([" <+> (SepByPrinter ", " $ fromExpression <$> xs) <+> "])"
+    ListExpression xs -> " UNNEST ([" <+> SepByPrinter ", " (fromExpression <$> xs) <+> "])"
     OpExpression op x y ->
       "("
         <+> fromExpression x
         <+> ") "
         <+> fromOp op
         <+> fromExpression y
+    FunctionExpression function args ->
+      fromFunctionName function <+> "(" <+> SepByPrinter ", " (fromExpression <$> args) <+> ")"
     ConditionalProjection expression fieldName ->
-      "(CASE WHEN(" <+> fromExpression expression
+      "(CASE WHEN("
+        <+> fromExpression expression
         <+> ") THEN "
         <+> fromFieldName fieldName
         <+> " ELSE NULL END)"
+    FunctionNamedArgument argName argValue ->
+      fromNameText argName <+> " => " <+> fromExpression argValue
 
 fromScalarType :: ScalarType -> Printer
 fromScalarType =
@@ -134,6 +140,7 @@ fromScalarType =
     StructScalarType -> "STRUCT"
     DecimalScalarType -> "DECIMAL"
     BigDecimalScalarType -> "BIGDECIMAL"
+    JsonScalarType -> "JSON"
 
 fromOp :: Op -> Printer
 fromOp =
@@ -144,6 +151,13 @@ fromOp =
     LessOrEqualOp -> "<="
     InOp -> "IN"
     NotInOp -> "NOT IN"
+    LikeOp -> "LIKE"
+    NotLikeOp -> "NOT LIKE"
+    -- BigQuery doesn't have case-insensitive versions of this operator, but
+    -- that's ok: by this point, we'll have built a version of the query that
+    -- works case insensitively.
+    ILikeOp -> "LIKE"
+    NotILikeOp -> "NOT LIKE"
 
 fromPath :: JsonPath -> Printer
 fromPath path =
@@ -152,6 +166,7 @@ fromPath path =
     string =
       fromExpression
         . ValueExpression
+        . TypedValue StringScalarType
         . StringValue
         . LT.toStrict
         . LT.toLazyText
@@ -174,17 +189,40 @@ fromSelect Select {..} = finalExpression
       SepByPrinter
         ("," <+> NewlinePrinter)
         (map fromProjection (toList (cleanProjections selectProjections)))
+    fromAsStruct = \case
+      AsStruct -> "AS STRUCT"
+      NoAsStruct -> ""
+    interpolatedQuery = \case
+      IIText t -> UnsafeTextPrinter t
+      IIVariable v -> fromExpression v
+    fromWith = \case
+      Just (With expressions) -> do
+        let go :: InterpolatedQuery Expression -> Printer
+            go = foldr ((<+>) . interpolatedQuery) "" . getInterpolatedQuery
+
+        "WITH "
+          <+> SepByPrinter
+            ("," <+> NewlinePrinter)
+            [ fromNameText alias <+> " AS " <+> parens (go thing)
+              | Aliased thing alias <- toList expressions
+            ]
+      Nothing -> ""
+    fromJoinType LeftOuter = "LEFT OUTER JOIN "
+    fromJoinType Inner = "INNER JOIN "
     inner =
       SepByPrinter
         NewlinePrinter
-        [ "SELECT " <+> IndentPrinter 7 projections,
+        [ fromWith selectWith,
+          "SELECT ",
+          fromAsStruct selectAsStruct,
+          IndentPrinter 7 projections,
           "FROM " <+> IndentPrinter 5 (fromFrom selectFrom),
           SepByPrinter
             NewlinePrinter
             ( map
                 ( \Join {..} ->
                     SeqPrinter
-                      [ "LEFT OUTER JOIN "
+                      [ fromJoinType joinType
                           <+> IndentPrinter 16 (fromJoinSource joinSource),
                         NewlinePrinter,
                         "AS " <+> fromJoinAlias joinAlias,
@@ -193,7 +231,7 @@ fromSelect Select {..} = finalExpression
                           <+> IndentPrinter
                             4
                             ( SepByPrinter
-                                (", " <+> NewlinePrinter)
+                                (" AND " <+> NewlinePrinter)
                                 (map fromOn joinOn)
                             )
                           <+> ")"
@@ -261,10 +299,10 @@ fromOrderBys top moffset morderBys =
             -- present.
             <+> " OFFSET "
             <+> fromExpression offset
-        (Top n, Nothing) -> "LIMIT " <+> fromValue (IntegerValue (intToInt64 n))
+        (Top n, Nothing) -> "LIMIT " <+> fromValue IntegerScalarType (IntegerValue (intToInt64 n))
         (Top n, Just offset) ->
           "LIMIT "
-            <+> fromValue (IntegerValue (intToInt64 n))
+            <+> fromValue IntegerScalarType (IntegerValue (intToInt64 n))
             <+> " OFFSET "
             <+> fromExpression offset
     ]
@@ -272,7 +310,7 @@ fromOrderBys top moffset morderBys =
 fromOrderBy :: OrderBy -> Printer
 fromOrderBy OrderBy {..} =
   "("
-    <+> fromFieldName orderByFieldName
+    <+> fromExpression orderByExpression
     <+> ") "
     <+> fromOrder orderByOrder
     <+> fromNullsOrder orderByNullsOrder
@@ -341,7 +379,10 @@ fromProjection =
                           ", "
                           ( fields
                               <&> \(fName@FieldName {..}, fieldOrigin :: FieldOrigin) ->
-                                "IFNULL(" <+> fromFieldName fName <+> ", " <+> fromFieldOrigin fieldOrigin
+                                "IFNULL("
+                                  <+> fromFieldName fName
+                                  <+> ", "
+                                  <+> fromFieldOrigin fieldOrigin
                                   <+> ") AS "
                                   <+> fromNameText fieldName
                           )
@@ -393,8 +434,8 @@ fromArrayAgg :: ArrayAgg -> Printer
 fromArrayAgg ArrayAgg {..} =
   SeqPrinter
     [ "ARRAY_AGG(",
-      IndentPrinter 10 $
-        SepByPrinter
+      IndentPrinter 10
+        $ SepByPrinter
           " "
           [ "STRUCT(" <+> IndentPrinter 7 projections <+> ")",
             fromOrderBys
@@ -433,6 +474,11 @@ fromNullAggregate = \case
 fromAggregate :: Aggregate -> Printer
 fromAggregate =
   \case
+    -- There's no reason why we'd be aggregating a ValueExpression /unless/
+    -- that ValueExpression is a reserved GraphQL name like __typename. In
+    -- which case, we don't want to run it through the aggregation function;
+    -- we just want to return the value.
+    OpAggregate _ (ValueExpression (TypedValue ty val)) -> fromValue ty val
     CountAggregate countable -> "COUNT(" <+> fromCountable countable <+> ")"
     OpAggregate text arg ->
       UnsafeTextPrinter text <+> "(" <+> fromExpression arg <+> ")"
@@ -444,27 +490,25 @@ fromAggregate =
               ", "
               ( map
                   ( \(alias, arg) ->
-                      UnsafeTextPrinter text
-                        <+> "("
-                        <+> fromExpression arg
-                        <+> ") AS "
+                      fromAggregate (OpAggregate text arg)
+                        <+> " AS "
                         <+> fromNameText alias
                   )
                   (toList args)
               )
           )
         <+> ")"
-    TextAggregate text -> fromExpression (ValueExpression (StringValue text))
+    TextAggregate text -> fromExpression (ValueExpression (TypedValue StringScalarType (StringValue text)))
 
-fromCountable :: Countable FieldName -> Printer
+fromCountable :: Countable Expression -> Printer
 fromCountable =
   \case
     StarCountable -> "*"
     NonNullFieldCountable fields ->
-      SepByPrinter ", " (map fromFieldName (toList fields))
+      SepByPrinter ", " (map fromExpression (toList fields))
     DistinctCountable fields ->
       "DISTINCT "
-        <+> SepByPrinter ", " (map fromFieldName (toList fields))
+        <+> SepByPrinter ", " (map fromExpression (toList fields))
 
 fromWhere :: Where -> Printer
 fromWhere =
@@ -499,7 +543,10 @@ fromSelectJson SelectJson {..} = finalExpression
         ("," <+> NewlinePrinter)
         (map extractJsonField selectJsonFields)
     extractJsonField (ColumnName name, scalarType) =
-      "CAST(JSON_VALUE(" <+> jsonStringField <+> ", '$." <+> fromString (T.unpack name)
+      "CAST(JSON_VALUE("
+        <+> jsonStringField
+        <+> ", '$."
+        <+> fromString (T.unpack name)
         <+> "') AS "
         <+> fromScalarType scalarType
         <+> ") AS "
@@ -513,10 +560,27 @@ fromFrom =
     FromSelect select -> fromAliased (fmap (parens . fromSelect) select)
     FromSelectJson selectJson ->
       fromAliased (fmap (parens . fromSelectJson) selectJson)
+    FromFunction selectFromFunction ->
+      fromAliased
+        ( fmap
+            ( \SelectFromFunction {..} ->
+                fromExpression $ FunctionExpression sffFunctionName sffArguments
+            )
+            selectFromFunction
+        )
+    -- Native Queries are bound as CTEs, so usage sites don't do "nativeQueryName AS alias".
+    FromNativeQuery (Aliased {aliasedAlias}) -> fromNameText aliasedAlias
 
 fromTableName :: TableName -> Printer
 fromTableName TableName {tableName, tableNameSchema} =
   fromNameText tableNameSchema <+> "." <+> fromNameText tableName
+
+fromFunctionName :: FunctionName -> Printer
+fromFunctionName = \case
+  FunctionName name Nothing ->
+    -- Function without dataset are system functions like 'ARRAY', 'UNNEST' etc.
+    UnsafeTextPrinter name
+  FunctionName name (Just dataset) -> fromNameText dataset <+> "." <+> fromNameText name
 
 fromAliased :: Aliased Printer -> Printer
 fromAliased Aliased {..} =
@@ -527,13 +591,13 @@ fromNameText :: Text -> Printer
 fromNameText t = UnsafeTextPrinter ("`" <> t <> "`")
 
 trueExpression :: Expression
-trueExpression = ValueExpression (BoolValue True)
+trueExpression = ValueExpression (TypedValue BoolScalarType (BoolValue True))
 
 falseExpression :: Expression
-falseExpression = ValueExpression (BoolValue False)
+falseExpression = ValueExpression (TypedValue BoolScalarType (BoolValue False))
 
-fromValue :: Value -> Printer
-fromValue = ValuePrinter
+fromValue :: ScalarType -> Value -> Printer
+fromValue ty val = ValuePrinter (TypedValue ty val)
 
 parens :: Printer -> Printer
 parens x = "(" <+> IndentPrinter 1 x <+> ")"
@@ -557,15 +621,17 @@ toTextFlat = LT.toStrict . LT.toLazyText . toBuilderFlat
 -- Printer ready for consumption
 
 -- | Produces a query with holes, and a mapping for each
-renderBuilderFlat :: Printer -> (Builder, InsOrdHashMap Int Value)
+renderBuilderFlat :: Printer -> (Builder, InsOrdHashMap Int TypedValue)
 renderBuilderFlat =
-  second (OMap.fromList . map swap . OMap.toList) . flip runState mempty
+  second (InsOrdHashMap.fromList . map swap . InsOrdHashMap.toList)
+    . flip runState mempty
     . runBuilderFlat
 
 -- | Produces a query with holes, and a mapping for each
-renderBuilderPretty :: Printer -> (Builder, InsOrdHashMap Int Value)
+renderBuilderPretty :: Printer -> (Builder, InsOrdHashMap Int TypedValue)
 renderBuilderPretty =
-  second (OMap.fromList . map swap . OMap.toList) . flip runState mempty
+  second (InsOrdHashMap.fromList . map swap . InsOrdHashMap.toList)
+    . flip runState mempty
     . runBuilderPretty
 
 --------------------------------------------------------------------------------
@@ -574,7 +640,7 @@ renderBuilderPretty =
 paramName :: Int -> Builder
 paramName next = "param" <> fromString (show next)
 
-runBuilderFlat :: Printer -> State (InsOrdHashMap Value Int) Builder
+runBuilderFlat :: Printer -> State (InsOrdHashMap TypedValue Int) Builder
 runBuilderFlat = go 0
   where
     go level =
@@ -586,18 +652,18 @@ runBuilderFlat = go 0
           fmap (mconcat . intersperse i . filter notEmpty) (mapM (go level) xs)
         NewlinePrinter -> pure " "
         IndentPrinter n p -> go (level + n) p
-        ValuePrinter (ArrayValue x) | V.null x -> pure "[]"
-        ValuePrinter v -> do
+        ValuePrinter (TypedValue _ (ArrayValue x)) | V.null x -> pure "[]"
+        ValuePrinter tv -> do
           themap <- get
           next <-
-            OMap.lookup v themap `onNothing` do
-              next <- gets OMap.size
-              modify (OMap.insert v next)
+            InsOrdHashMap.lookup tv themap `onNothing` do
+              next <- gets InsOrdHashMap.size
+              modify (InsOrdHashMap.insert tv next)
               pure next
           pure ("@" <> paramName next)
     notEmpty = (/= mempty)
 
-runBuilderPretty :: Printer -> State (InsOrdHashMap Value Int) Builder
+runBuilderPretty :: Printer -> State (InsOrdHashMap TypedValue Int) Builder
 runBuilderPretty = go 0
   where
     go level =
@@ -609,14 +675,14 @@ runBuilderPretty = go 0
           fmap (mconcat . intersperse i . filter notEmpty) (mapM (go level) xs)
         NewlinePrinter -> pure ("\n" <> indentation level)
         IndentPrinter n p -> go (level + n) p
-        ValuePrinter (ArrayValue x)
+        ValuePrinter (TypedValue _ (ArrayValue x))
           | V.null x -> pure "[]"
-        ValuePrinter v -> do
+        ValuePrinter tv -> do
           themap <- get
           next <-
-            OMap.lookup v themap `onNothing` do
-              next <- gets OMap.size
-              modify (OMap.insert v next)
+            InsOrdHashMap.lookup tv themap `onNothing` do
+              next <- gets InsOrdHashMap.size
+              modify (InsOrdHashMap.insert tv next)
               pure next
           pure ("@" <> paramName next)
     indentation n = LT.fromText (T.replicate n " ")

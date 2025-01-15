@@ -1,9 +1,14 @@
--- | Functions and datatypes for interpreting Postgres errors.
+{-# LANGUAGE TemplateHaskell #-}
+
+-- | Postgres SQL Error
+--
+-- Functions and datatypes for interpreting Postgres errors.
 module Hasura.Backends.Postgres.SQL.Error
   ( PGErrorType (..),
     _PGDataException,
     _PGIntegrityConstraintViolation,
     _PGSyntaxErrorOrAccessRuleViolation,
+    _PGTransactionRollback,
     pgErrorType,
     PGErrorCode (..),
     _PGErrorGeneric,
@@ -11,28 +16,30 @@ module Hasura.Backends.Postgres.SQL.Error
     PGDataException (..),
     PGIntegrityConstraintViolation (..),
     PGSyntaxErrorOrAccessRuleViolation (..),
+    PGTransactionRollback (..),
   )
 where
 
 import Control.Lens.TH (makePrisms)
 import Data.Text qualified as T
-import Database.PG.Query.Connection qualified as Q
+import Database.PG.Query.Connection qualified as PG
 import Hasura.Prelude
 
 -- | The top-level error code type. Errors in Postgres are divided into different /classes/, which
 -- are further subdivided into individual error codes. Even if a particular status code is not known
 -- to the application, it’s possible to determine its class and handle it appropriately.
 data PGErrorType
-  = PGDataException !(Maybe (PGErrorCode PGDataException))
-  | PGIntegrityConstraintViolation !(Maybe (PGErrorCode PGIntegrityConstraintViolation))
-  | PGSyntaxErrorOrAccessRuleViolation !(Maybe (PGErrorCode PGSyntaxErrorOrAccessRuleViolation))
+  = PGDataException (Maybe (PGErrorCode PGDataException))
+  | PGIntegrityConstraintViolation (Maybe (PGErrorCode PGIntegrityConstraintViolation))
+  | PGSyntaxErrorOrAccessRuleViolation (Maybe (PGErrorCode PGSyntaxErrorOrAccessRuleViolation))
+  | PGTransactionRollback (Maybe (PGErrorCode PGTransactionRollback))
   deriving (Show, Eq)
 
 data PGErrorCode a
   = -- | represents errors that have the non-specific @000@ status code
     PGErrorGeneric
   | -- | represents errors with a known, more specific status code
-    PGErrorSpecific !a
+    PGErrorSpecific a
   deriving (Show, Eq, Functor)
 
 data PGDataException
@@ -56,11 +63,16 @@ data PGSyntaxErrorOrAccessRuleViolation
   | PGInvalidColumnReference
   deriving (Show, Eq)
 
+data PGTransactionRollback
+  = PGSerializationFailure
+  deriving (Show, Eq)
+
 $(makePrisms ''PGErrorType)
 $(makePrisms ''PGErrorCode)
 
-pgErrorType :: Q.PGStmtErrDetail -> Maybe PGErrorType
-pgErrorType errorDetails = parseTypes =<< Q.edStatusCode errorDetails
+pgErrorType :: PG.PGStmtErrDetail -> Maybe PGErrorType
+pgErrorType errorDetails = do
+  parseTypes =<< PG.edStatusCode errorDetails
   where
     parseTypes fullCodeText =
       choice
@@ -81,6 +93,11 @@ pgErrorType errorDetails = parseTypes =<< Q.edStatusCode errorDetails
               code "505" PGUniqueViolation,
               code "514" PGCheckViolation,
               code "P01" PGExclusionViolation
+            ],
+          withClass
+            "40"
+            PGTransactionRollback
+            [ code "001" PGSerializationFailure
             ],
           withClass
             "42"

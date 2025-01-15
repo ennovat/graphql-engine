@@ -1,27 +1,36 @@
 {-# LANGUAGE UndecidableInstances #-}
+-- TODO:
+-- In the use of ‘unregisteredClaims’ (imported from Crypto.JWT):
+--     Deprecated: "use a sub-type"
+{-# OPTIONS_GHC -Wno-deprecations #-}
 
 module Hasura.Server.AuthSpec (spec) where
 
+import Control.Concurrent.Extended (ForkableMonadIO)
 import Control.Lens hiding ((.=))
-import Control.Monad.Trans.Control
-import Control.Monad.Trans.Managed (lowerManagedT)
 import Crypto.JOSE.JWK qualified as Jose
 import Crypto.JWT qualified as JWT
 import Data.Aeson ((.=))
 import Data.Aeson qualified as J
-import Data.HashMap.Strict qualified as Map
+import Data.Aeson.Key qualified as K
+import Data.Aeson.KeyMap qualified as KM
+import Data.CaseInsensitive qualified as CI
+import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as Set
 import Data.Parser.JSONPath
+import Data.Text qualified as T
+import Hasura.Authentication.Role (RoleName, adminRoleName, mkRoleName)
+import Hasura.Authentication.Session
+import Hasura.Authentication.User (UserAdminSecret (..), UserInfo (..), UserRoleBuild (..), mkUserInfo)
 import Hasura.Base.Error
 import Hasura.GraphQL.Transport.HTTP.Protocol (ReqsText)
-import Hasura.Logging
+import Hasura.Logging (Logger (..))
 import Hasura.Prelude
 import Hasura.Server.Auth hiding (getUserInfoWithExpTime, processJwt)
 import Hasura.Server.Auth.JWT hiding (processJwt)
-import Hasura.Server.Utils
-import Hasura.Session
-import Hasura.Tracing qualified as Tracing
-import Network.HTTP.Types qualified as N
+import Hasura.Server.Utils ()
+import Network.HTTP.Client qualified as HTTP
+import Network.HTTP.Types qualified as HTTP
 import Test.Hspec
 
 spec :: Spec
@@ -30,11 +39,11 @@ spec = do
   setupAuthModeTests
   parseClaimsMapTests
 
-allowedRolesClaimText :: Text
-allowedRolesClaimText = sessionVariableToText allowedRolesClaim
+allowedRolesClaimText :: K.Key
+allowedRolesClaimText = fromSessionVariable allowedRolesClaim
 
-defaultRoleClaimText :: Text
-defaultRoleClaimText = sessionVariableToText defaultRoleClaim
+defaultRoleClaimText :: K.Key
+defaultRoleClaimText = fromSessionVariable defaultRoleClaim
 
 -- Unit test the core of our authentication code. This doesn't test the details
 -- of resolving roles from JWT or webhook.
@@ -44,7 +53,7 @@ getUserInfoWithExpTimeTests = describe "getUserInfo" $ do
   ---- FUNCTION UNDER TEST:
   let gqlUserInfoWithExpTime ::
         J.Object ->
-        [N.Header] ->
+        [HTTP.Header] ->
         AuthMode ->
         Maybe ReqsText ->
         IO (Either Code RoleName)
@@ -65,148 +74,142 @@ getUserInfoWithExpTimeTests = describe "getUserInfo" $ do
                   (URBFromSessionVariablesFallback $ mkRoleNameE nm)
                   UAdminSecretNotSent
                   (mkSessionVariablesHeaders mempty)
-
-          processAuthZHeader _jwtCtx _authzHeader =
-            return $ Just (mapKeys mkSessionVariable claims, Nothing)
-
-          processJwt = processJwt_ processAuthZHeader (const JHAuthorization)
+          processAuthZHeader _jwtCtx _authzHeader = pure (parseObjectAsClaims claims, Nothing)
+          processJwt = processJwt_ processAuthZHeader tokenIssuer (const JHAuthorization)
 
   let getUserInfoWithExpTime ::
         J.Object ->
-        [N.Header] ->
+        [HTTP.Header] ->
         AuthMode ->
         IO (Either Code RoleName)
       getUserInfoWithExpTime o claims authMode = gqlUserInfoWithExpTime o claims authMode Nothing
-
-  let setupAuthMode'E a b c d =
-        either (const $ error "fixme") id <$> setupAuthMode' a b c d
 
   let ourUnauthRole = mkRoleNameE "an0nymous"
 
   describe "started without admin secret" $ do
     it "gives admin by default" $ do
-      mode <- setupAuthMode'E Nothing Nothing Nothing Nothing
-      getUserInfoWithExpTime mempty [] mode
+      mode <- setupAuthMode'E Nothing Nothing mempty Nothing
+      getUserInfoWithExpTime mempty mempty mode
         `shouldReturn` Right adminRoleName
     it "allows any requested role" $ do
-      mode <- setupAuthMode'E Nothing Nothing Nothing Nothing
-      getUserInfoWithExpTime mempty [(userRoleHeader, "r00t")] mode
+      mode <- setupAuthMode'E Nothing Nothing mempty Nothing
+      getUserInfoWithExpTime mempty [sessionVariableToHeader userRoleHeader "r00t"] mode
         `shouldReturn` Right (mkRoleNameE "r00t")
 
   describe "admin secret only" $ do
     describe "unauth role NOT set" $ do
-      mode <- runIO $ setupAuthMode'E (Just $ Set.singleton $ hashAdminSecret "secret") Nothing Nothing Nothing
+      mode <- runIO $ setupAuthMode'E (Just $ Set.singleton $ hashAdminSecret "secret") Nothing mempty Nothing
 
       it "accepts when admin secret matches" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret"] mode
           `shouldReturn` Right adminRoleName
       it "accepts when admin secret matches, honoring role request" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "secret"), (userRoleHeader, "r00t")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret", sessionVariableToHeader userRoleHeader "r00t"] mode
           `shouldReturn` Right (mkRoleNameE "r00t")
 
       it "rejects when doesn't match" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "bad secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "bad secret"] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader ""] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [("blah", "blah"), (adminSecretHeader, "blah")] mode
+        getUserInfoWithExpTime mempty [("blah", "blah"), sessionVariableToHeader adminSecretHeader "blah"] mode
           `shouldReturn` Left AccessDenied
         -- with deprecated header:
-        getUserInfoWithExpTime mempty [(deprecatedAccessKeyHeader, "bad secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader deprecatedAccessKeyHeader "bad secret"] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [(deprecatedAccessKeyHeader, "")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader deprecatedAccessKeyHeader ""] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [("blah", "blah"), (deprecatedAccessKeyHeader, "blah")] mode
+        getUserInfoWithExpTime mempty [("blah", "blah"), sessionVariableToHeader deprecatedAccessKeyHeader "blah"] mode
           `shouldReturn` Left AccessDenied
 
       it "rejects when no secret sent, since no fallback unauth role" $ do
-        getUserInfoWithExpTime mempty [] mode
+        getUserInfoWithExpTime mempty mempty mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [(userRoleHeader, "r00t"), (userRoleHeader, "admin")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader userRoleHeader "r00t", sessionVariableToHeader userRoleHeader "admin"] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [(userRoleHeader, "r00t")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader userRoleHeader "r00t"] mode
           `shouldReturn` Left AccessDenied
         getUserInfoWithExpTime mempty [("blah", "blah")] mode
           `shouldReturn` Left AccessDenied
 
     describe "unauth role set" $ do
       mode <-
-        runIO $
-          setupAuthMode'E (Just $ Set.singleton $ hashAdminSecret "secret") Nothing Nothing (Just ourUnauthRole)
+        runIO
+          $ setupAuthMode'E (Just $ Set.singleton $ hashAdminSecret "secret") Nothing mempty (Just ourUnauthRole)
       it "accepts when admin secret matches" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret"] mode
           `shouldReturn` Right adminRoleName
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "secret"), ("heh", "heh")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret", ("heh", "heh")] mode
           `shouldReturn` Right adminRoleName
       it "accepts when admin secret matches, honoring role request" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "secret"), (userRoleHeader, "r00t")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret", sessionVariableToHeader userRoleHeader "r00t"] mode
           `shouldReturn` Right (mkRoleNameE "r00t")
 
       it "rejects when doesn't match" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "bad secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "bad secret"] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader ""] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [("blah", "blah"), (adminSecretHeader, "blah")] mode
+        getUserInfoWithExpTime mempty [("blah", "blah"), sessionVariableToHeader adminSecretHeader "blah"] mode
           `shouldReturn` Left AccessDenied
         -- with deprecated header:
-        getUserInfoWithExpTime mempty [(deprecatedAccessKeyHeader, "bad secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader deprecatedAccessKeyHeader "bad secret"] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [(deprecatedAccessKeyHeader, "")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader deprecatedAccessKeyHeader ""] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [("blah", "blah"), (deprecatedAccessKeyHeader, "blah")] mode
+        getUserInfoWithExpTime mempty [("blah", "blah"), sessionVariableToHeader deprecatedAccessKeyHeader "blah"] mode
           `shouldReturn` Left AccessDenied
 
       it "accepts when no secret sent and unauth role defined" $ do
-        getUserInfoWithExpTime mempty [] mode
+        getUserInfoWithExpTime mempty mempty mode
           `shouldReturn` Right ourUnauthRole
         getUserInfoWithExpTime mempty [("heh", "heh")] mode
           `shouldReturn` Right ourUnauthRole
         -- FIXME MAYBE (see NOTE (*))
-        getUserInfoWithExpTime mempty [(userRoleHeader, "r00t")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader userRoleHeader "r00t"] mode
           `shouldReturn` Right ourUnauthRole
 
   -- Unauthorized role is not supported for webhook
   describe "webhook" $ do
     mode <-
-      runIO $
-        setupAuthMode'E (Just $ Set.singleton $ hashAdminSecret "secret") (Just fakeAuthHook) Nothing Nothing
+      runIO
+        $ setupAuthMode'E (Just $ Set.singleton $ hashAdminSecret "secret") (Just fakeAuthHook) mempty Nothing
 
     it "accepts when admin secret matches" $ do
-      getUserInfoWithExpTime mempty [(adminSecretHeader, "secret")] mode
+      getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret"] mode
         `shouldReturn` Right adminRoleName
     it "accepts when admin secret matches, honoring role request" $ do
-      getUserInfoWithExpTime mempty [(adminSecretHeader, "secret"), (userRoleHeader, "r00t")] mode
+      getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret", sessionVariableToHeader userRoleHeader "r00t"] mode
         `shouldReturn` Right (mkRoleNameE "r00t")
 
     it "rejects when admin secret doesn't match" $ do
-      getUserInfoWithExpTime mempty [(adminSecretHeader, "bad secret")] mode
+      getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "bad secret"] mode
         `shouldReturn` Left AccessDenied
-      getUserInfoWithExpTime mempty [(adminSecretHeader, "")] mode
+      getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader ""] mode
         `shouldReturn` Left AccessDenied
-      getUserInfoWithExpTime mempty [("blah", "blah"), (adminSecretHeader, "blah")] mode
+      getUserInfoWithExpTime mempty [("blah", "blah"), sessionVariableToHeader adminSecretHeader "blah"] mode
         `shouldReturn` Left AccessDenied
       -- with deprecated header:
-      getUserInfoWithExpTime mempty [(deprecatedAccessKeyHeader, "bad secret")] mode
+      getUserInfoWithExpTime mempty [sessionVariableToHeader deprecatedAccessKeyHeader "bad secret"] mode
         `shouldReturn` Left AccessDenied
-      getUserInfoWithExpTime mempty [(deprecatedAccessKeyHeader, "")] mode
+      getUserInfoWithExpTime mempty [sessionVariableToHeader deprecatedAccessKeyHeader ""] mode
         `shouldReturn` Left AccessDenied
-      getUserInfoWithExpTime mempty [("blah", "blah"), (deprecatedAccessKeyHeader, "blah")] mode
+      getUserInfoWithExpTime mempty [("blah", "blah"), sessionVariableToHeader deprecatedAccessKeyHeader "blah"] mode
         `shouldReturn` Left AccessDenied
 
     it "authenticates with webhook when no admin secret sent" $ do
-      getUserInfoWithExpTime mempty [] mode
+      getUserInfoWithExpTime mempty mempty mode
         `shouldReturn` Right (mkRoleNameE "hook")
       getUserInfoWithExpTime mempty [("blah", "blah")] mode
         `shouldReturn` Right (mkRoleNameE "hook")
-      getUserInfoWithExpTime mempty [(userRoleHeader, "hook")] mode
+      getUserInfoWithExpTime mempty [sessionVariableToHeader userRoleHeader "hook"] mode
         `shouldReturn` Right (mkRoleNameE "hook")
 
     -- FIXME MAYBE (see NOTE (*))
     it "ignores requested role, uses webhook role" $ do
-      getUserInfoWithExpTime mempty [(userRoleHeader, "r00t"), (userRoleHeader, "admin")] mode
+      getUserInfoWithExpTime mempty [sessionVariableToHeader userRoleHeader "r00t", sessionVariableToHeader userRoleHeader "admin"] mode
         `shouldReturn` Right (mkRoleNameE "hook")
-      getUserInfoWithExpTime mempty [(userRoleHeader, "r00t")] mode
+      getUserInfoWithExpTime mempty [sessionVariableToHeader userRoleHeader "r00t"] mode
         `shouldReturn` Right (mkRoleNameE "hook")
 
   -- helper for generating mocked up verified JWT token claims, as though returned by 'processAuthZHeader':
@@ -217,105 +220,105 @@ getUserInfoWithExpTimeTests = describe "getUserInfo" $ do
   describe "JWT" $ do
     describe "unauth role NOT set" $ do
       mode <-
-        runIO $
-          setupAuthMode'E (Just $ Set.singleton $ hashAdminSecret "secret") Nothing (Just fakeJWTConfig) Nothing
+        runIO
+          $ setupAuthMode'E (Just $ Set.singleton $ hashAdminSecret "secret") Nothing [fakeJWTConfig] Nothing
 
       it "accepts when admin secret matches" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret"] mode
           `shouldReturn` Right adminRoleName
       it "accepts when admin secret matches, honoring role request" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "secret"), (userRoleHeader, "r00t")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret", sessionVariableToHeader userRoleHeader "r00t"] mode
           `shouldReturn` Right (mkRoleNameE "r00t")
 
       it "rejects when admin secret doesn't match" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "bad secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "bad secret"] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader ""] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [("blah", "blah"), (adminSecretHeader, "blah")] mode
+        getUserInfoWithExpTime mempty [("blah", "blah"), sessionVariableToHeader adminSecretHeader "blah"] mode
           `shouldReturn` Left AccessDenied
         -- with deprecated header:
-        getUserInfoWithExpTime mempty [(deprecatedAccessKeyHeader, "bad secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader deprecatedAccessKeyHeader "bad secret"] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [(deprecatedAccessKeyHeader, "")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader deprecatedAccessKeyHeader ""] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [("blah", "blah"), (deprecatedAccessKeyHeader, "blah")] mode
+        getUserInfoWithExpTime mempty [("blah", "blah"), sessionVariableToHeader deprecatedAccessKeyHeader "blah"] mode
           `shouldReturn` Left AccessDenied
 
       it "rejects when admin secret not sent and no 'Authorization' header" $ do
         getUserInfoWithExpTime mempty [("blah", "blah")] mode
           `shouldReturn` Left InvalidHeaders
-        getUserInfoWithExpTime mempty [] mode
+        getUserInfoWithExpTime mempty mempty mode
           `shouldReturn` Left InvalidHeaders
 
     describe "unauth role set" $ do
       mode <-
-        runIO $
-          setupAuthMode'E
+        runIO
+          $ setupAuthMode'E
             (Just $ Set.singleton $ hashAdminSecret "secret")
             Nothing
-            (Just fakeJWTConfig)
+            [fakeJWTConfig]
             (Just ourUnauthRole)
 
       it "accepts when admin secret matches" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret"] mode
           `shouldReturn` Right adminRoleName
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "secret"), ("heh", "heh")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret", ("heh", "heh")] mode
           `shouldReturn` Right adminRoleName
       it "accepts when admin secret matches, honoring role request" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "secret"), (userRoleHeader, "r00t")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "secret", sessionVariableToHeader userRoleHeader "r00t"] mode
           `shouldReturn` Right (mkRoleNameE "r00t")
 
       it "rejects when admin secret doesn't match" $ do
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "bad secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader "bad secret"] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [(adminSecretHeader, "")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader adminSecretHeader ""] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [("blah", "blah"), (adminSecretHeader, "blah")] mode
+        getUserInfoWithExpTime mempty [("blah", "blah"), sessionVariableToHeader adminSecretHeader "blah"] mode
           `shouldReturn` Left AccessDenied
         -- with deprecated header:
-        getUserInfoWithExpTime mempty [(deprecatedAccessKeyHeader, "bad secret")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader deprecatedAccessKeyHeader "bad secret"] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [(deprecatedAccessKeyHeader, "")] mode
+        getUserInfoWithExpTime mempty [sessionVariableToHeader deprecatedAccessKeyHeader ""] mode
           `shouldReturn` Left AccessDenied
-        getUserInfoWithExpTime mempty [("blah", "blah"), (deprecatedAccessKeyHeader, "blah")] mode
+        getUserInfoWithExpTime mempty [("blah", "blah"), sessionVariableToHeader deprecatedAccessKeyHeader "blah"] mode
           `shouldReturn` Left AccessDenied
 
       it "authorizes as unauth role when no 'Authorization' header" $ do
         getUserInfoWithExpTime mempty [("blah", "blah")] mode
           `shouldReturn` Right ourUnauthRole
-        getUserInfoWithExpTime mempty [] mode
+        getUserInfoWithExpTime mempty mempty mode
           `shouldReturn` Right ourUnauthRole
 
     describe "when Authorization header sent, and no admin secret" $ do
       modeA <-
-        runIO $
-          setupAuthMode'E
+        runIO
+          $ setupAuthMode'E
             (Just $ Set.singleton $ hashAdminSecret "secret")
             Nothing
-            (Just fakeJWTConfig)
+            [fakeJWTConfig]
             (Just ourUnauthRole)
       modeB <-
-        runIO $
-          setupAuthMode'E
+        runIO
+          $ setupAuthMode'E
             (Just $ Set.singleton $ hashAdminSecret "secret")
             Nothing
-            (Just fakeJWTConfig)
+            [fakeJWTConfig]
             Nothing
 
       -- Here the unauth role does not come into play at all, so map same tests over both modes:
-      forM_ [(modeA, "with unauth role set"), (modeB, "with unauth role NOT set")] $
-        \(mode, modeMsg) -> describe modeMsg $ do
+      forM_ [(modeA, "with unauth role set"), (modeB, "with unauth role NOT set")]
+        $ \(mode, modeMsg) -> describe modeMsg $ do
           it "authorizes successfully with JWT when requested role allowed" $ do
             let claim =
                   unObject
                     [ allowedRolesClaimText .= (["editor", "user", "mod"] :: [Text]),
                       defaultRoleClaimText .= ("user" :: Text)
                     ]
-            getUserInfoWithExpTime claim [("Authorization", "IGNORED"), (userRoleHeader, "editor")] mode
+            getUserInfoWithExpTime claim [("Authorization", "Bearer IGNORED"), sessionVariableToHeader userRoleHeader "editor"] mode
               `shouldReturn` Right (mkRoleNameE "editor")
             -- Uses the defaultRoleClaimText:
-            getUserInfoWithExpTime claim [("Authorization", "IGNORED")] mode
+            getUserInfoWithExpTime claim [("Authorization", "Bearer IGNORED")] mode
               `shouldReturn` Right (mkRoleNameE "user")
 
           it "rejects when requested role is not allowed" $ do
@@ -324,27 +327,27 @@ getUserInfoWithExpTimeTests = describe "getUserInfo" $ do
                     [ allowedRolesClaimText .= (["editor", "user", "mod"] :: [Text]),
                       defaultRoleClaimText .= ("user" :: Text)
                     ]
-            getUserInfoWithExpTime claim [("Authorization", "IGNORED"), (userRoleHeader, "r00t")] mode
+            getUserInfoWithExpTime claim [("Authorization", "Bearer IGNORED"), sessionVariableToHeader userRoleHeader "r00t"] mode
               `shouldReturn` Left AccessDenied
-            getUserInfoWithExpTime claim [("Authorization", "IGNORED"), (userRoleHeader, "admin")] mode
+            getUserInfoWithExpTime claim [("Authorization", "Bearer IGNORED"), sessionVariableToHeader userRoleHeader "admin"] mode
               `shouldReturn` Left AccessDenied
 
           -- A corner case, but the behavior seems desirable:
           it "always rejects when token has empty allowedRolesClaimText" $ do
-            let claim = unObject [allowedRolesClaimText .= ([] :: [Text]), defaultRoleClaimText .= ("user" :: Text)]
-            getUserInfoWithExpTime claim [("Authorization", "IGNORED"), (userRoleHeader, "admin")] mode
+            let claim = unObject [allowedRolesClaimText .= (mempty :: [Text]), defaultRoleClaimText .= ("user" :: Text)]
+            getUserInfoWithExpTime claim [("Authorization", "Bearer IGNORED"), sessionVariableToHeader userRoleHeader "admin"] mode
               `shouldReturn` Left AccessDenied
-            getUserInfoWithExpTime claim [("Authorization", "IGNORED"), (userRoleHeader, "user")] mode
+            getUserInfoWithExpTime claim [("Authorization", "Bearer IGNORED"), sessionVariableToHeader userRoleHeader "user"] mode
               `shouldReturn` Left AccessDenied
-            getUserInfoWithExpTime claim [("Authorization", "IGNORED")] mode
+            getUserInfoWithExpTime claim [("Authorization", "Bearer IGNORED")] mode
               `shouldReturn` Left AccessDenied
 
           it "rejects when token doesn't have proper allowedRolesClaimText and defaultRoleClaimText" $ do
             let claim0 = unObject [allowedRolesClaimText .= (["editor", "user", "mod"] :: [Text])]
                 claim1 = unObject [defaultRoleClaimText .= ("user" :: Text)]
-                claim2 = unObject []
+                claim2 = unObject mempty
             for_ [claim0, claim1, claim2] $ \claim ->
-              getUserInfoWithExpTime claim [("Authorization", "IGNORED")] mode
+              getUserInfoWithExpTime claim [("Authorization", "Bearer IGNORED")] mode
                 `shouldReturn` Left JWTRoleClaimMissing
 
 -- (*) FIXME NOTE (re above):
@@ -370,53 +373,53 @@ setupAuthModeTests = describe "setupAuthMode" $ do
 
   -- These are all various error cases, except for the AMNoAuth mode:
   it "with no admin secret provided" $ do
-    setupAuthMode' Nothing Nothing Nothing Nothing
+    setupAuthMode' Nothing Nothing mempty Nothing
       `shouldReturn` Right AMNoAuth
     -- We insist on an admin secret in order to use webhook or JWT auth:
-    setupAuthMode' Nothing Nothing (Just fakeJWTConfig) Nothing
+    setupAuthMode' Nothing Nothing [fakeJWTConfig] Nothing
       `shouldReturn` Left ()
-    setupAuthMode' Nothing (Just fakeAuthHook) Nothing Nothing
+    setupAuthMode' Nothing (Just fakeAuthHook) mempty Nothing
       `shouldReturn` Left ()
     -- ...and we can't have both:
-    setupAuthMode' Nothing (Just fakeAuthHook) (Just fakeJWTConfig) Nothing
+    setupAuthMode' Nothing (Just fakeAuthHook) [fakeJWTConfig] Nothing
       `shouldReturn` Left ()
     -- If the unauthenticated role was set but would otherwise be ignored this
     -- should be an error (for now), since users might expect all access to use
     -- the specified role. This first case would be the real worrying one:
-    setupAuthMode' Nothing Nothing Nothing (Just unauthRole)
+    setupAuthMode' Nothing Nothing mempty (Just unauthRole)
       `shouldReturn` Left ()
-    setupAuthMode' Nothing Nothing (Just fakeJWTConfig) (Just unauthRole)
+    setupAuthMode' Nothing Nothing [fakeJWTConfig] (Just unauthRole)
       `shouldReturn` Left ()
-    setupAuthMode' Nothing (Just fakeAuthHook) Nothing (Just unauthRole)
+    setupAuthMode' Nothing (Just fakeAuthHook) mempty (Just unauthRole)
       `shouldReturn` Left ()
-    setupAuthMode' Nothing (Just fakeAuthHook) (Just fakeJWTConfig) (Just unauthRole)
+    setupAuthMode' Nothing (Just fakeAuthHook) [fakeJWTConfig] (Just unauthRole)
       `shouldReturn` Left ()
 
   it "with admin secret provided" $ do
-    setupAuthMode' (Just secret) Nothing Nothing Nothing
+    setupAuthMode' (Just secret) Nothing mempty Nothing
       `shouldReturn` Right (AMAdminSecret secret Nothing)
-    setupAuthMode' (Just secret) Nothing Nothing (Just unauthRole)
+    setupAuthMode' (Just secret) Nothing mempty (Just unauthRole)
       `shouldReturn` Right (AMAdminSecret secret $ Just unauthRole)
 
-    setupAuthMode' (Just secret) Nothing (Just fakeJWTConfig) Nothing >>= \case
+    setupAuthMode' (Just secret) Nothing [fakeJWTConfig] Nothing >>= \case
       Right (AMAdminSecretAndJWT s _ Nothing) -> do
         s `shouldBe` secret
       _ -> expectationFailure "AMAdminSecretAndJWT"
-    setupAuthMode' (Just secret) Nothing (Just fakeJWTConfig) (Just unauthRole) >>= \case
+    setupAuthMode' (Just secret) Nothing [fakeJWTConfig] (Just unauthRole) >>= \case
       Right (AMAdminSecretAndJWT s _ ur) -> do
         s `shouldBe` secret
         ur `shouldBe` Just unauthRole
       _ -> expectationFailure "AMAdminSecretAndJWT"
 
-    setupAuthMode' (Just secret) (Just fakeAuthHook) Nothing Nothing
+    setupAuthMode' (Just secret) (Just fakeAuthHook) mempty Nothing
       `shouldReturn` Right (AMAdminSecretAndHook secret fakeAuthHook)
     -- auth hook can't make use of unauthenticated role for now (no good UX):
-    setupAuthMode' (Just secret) (Just fakeAuthHook) Nothing (Just unauthRole)
+    setupAuthMode' (Just secret) (Just fakeAuthHook) mempty (Just unauthRole)
       `shouldReturn` Left ()
     -- we can't have both:
-    setupAuthMode' (Just secret) (Just fakeAuthHook) (Just fakeJWTConfig) Nothing
+    setupAuthMode' (Just secret) (Just fakeAuthHook) [fakeJWTConfig] Nothing
       `shouldReturn` Left ()
-    setupAuthMode' (Just secret) (Just fakeAuthHook) (Just fakeJWTConfig) (Just unauthRole)
+    setupAuthMode' (Just secret) (Just fakeAuthHook) [fakeJWTConfig] (Just unauthRole)
       `shouldReturn` Left ()
 
 parseClaimsMapTests :: Spec
@@ -433,7 +436,7 @@ parseClaimsMapTests = describe "parseClaimMapTests" $ do
         _ -> error "Impossible!"
 
       defaultClaimsMap =
-        Map.fromList
+        HashMap.fromList
           [ (allowedRolesClaim, J.toJSON (map mkRoleNameE ["user", "editor"])),
             (defaultRoleClaim, J.toJSON (mkRoleNameE "user"))
           ]
@@ -442,10 +445,10 @@ parseClaimsMapTests = describe "parseClaimMapTests" $ do
     describe "JWT configured with namespace key, the key is a text value which is expected to be at the root of the JWT token" $ do
       it "parses claims map from the JWT token with correct namespace " $ do
         let claimsObj =
-              unObject $
-                [ "x-hasura-allowed-roles" .= (["user", "editor"] :: [Text]),
-                  "x-hasura-default-role" .= ("user" :: Text)
-                ]
+              unObject
+                $ [ "x-hasura-allowed-roles" .= (["user", "editor"] :: [Text]),
+                    "x-hasura-default-role" .= ("user" :: Text)
+                  ]
         let obj = unObject $ ["claims_map" .= claimsObj]
             claimsSet = mkClaimsSetWithUnregisteredClaims obj
         parseClaimsMap_ claimsSet (JCNamespace (ClaimNs "claims_map") defaultClaimsFormat)
@@ -453,10 +456,10 @@ parseClaimsMapTests = describe "parseClaimMapTests" $ do
 
       it "doesn't parse claims map from the JWT token with wrong namespace " $ do
         let claimsObj =
-              unObject $
-                [ "x-hasura-allowed-roles" .= (["user", "editor"] :: [Text]),
-                  "x-hasura-default-role" .= ("user" :: Text)
-                ]
+              unObject
+                $ [ "x-hasura-allowed-roles" .= (["user", "editor"] :: [Text]),
+                    "x-hasura-default-role" .= ("user" :: Text)
+                  ]
         let obj = unObject $ ["claims_map" .= claimsObj]
             claimsSet = mkClaimsSetWithUnregisteredClaims obj
         parseClaimsMap_ claimsSet (JCNamespace (ClaimNs "wrong_claims_map") defaultClaimsFormat)
@@ -465,24 +468,24 @@ parseClaimsMapTests = describe "parseClaimMapTests" $ do
     describe "JWT configured with namespace JSON path, JSON path to the claims map" $ do
       it "parse claims map from the JWT token using claims namespace JSON Path" $ do
         let unregisteredClaims =
-              unObject $
-                [ "x-hasura-allowed-roles" .= (["user", "editor"] :: [Text]),
-                  "x-hasura-default-role" .= ("user" :: Text),
-                  "sub" .= ("random" :: Text),
-                  "exp" .= (1626420800 :: Int) -- we ignore these non session variables, in the response
-                ]
+              unObject
+                $ [ "x-hasura-allowed-roles" .= (["user", "editor"] :: [Text]),
+                    "x-hasura-default-role" .= ("user" :: Text),
+                    "sub" .= ("random" :: Text),
+                    "exp" .= (1626420800 :: Int) -- we ignore these non session variables, in the response
+                  ]
             claimsSetWithSub =
-              (JWT.emptyClaimsSet & JWT.claimSub .~ Just "random") & JWT.unregisteredClaims .~ unregisteredClaims
+              (JWT.emptyClaimsSet & JWT.claimSub .~ Just "random") & JWT.unregisteredClaims .~ KM.toMapText unregisteredClaims
         parseClaimsMap_ claimsSetWithSub (JCNamespace (ClaimNsPath (mkJSONPathE "$")) defaultClaimsFormat)
           -- "$" JSON path signifies the claims are to be found in the root of the JWT token
           `shouldReturn` Right defaultClaimsMap
 
       it "throws error while attempting to parse claims map from the JWT token with a wrong namespace JSON Path" $ do
         let claimsObj =
-              unObject $
-                [ "x-hasura-allowed-roles" .= (["user", "editor"] :: [Text]),
-                  "x-hasura-default-role" .= ("user" :: Text)
-                ]
+              unObject
+                $ [ "x-hasura-allowed-roles" .= (["user", "editor"] :: [Text]),
+                    "x-hasura-default-role" .= ("user" :: Text)
+                  ]
             obj = unObject $ ["hasura_claims" .= claimsObj]
             claimsSet = mkClaimsSetWithUnregisteredClaims obj
         parseClaimsMap_ claimsSet (JCNamespace (ClaimNsPath (mkJSONPathE "$.claims")) defaultClaimsFormat)
@@ -490,31 +493,31 @@ parseClaimsMapTests = describe "parseClaimMapTests" $ do
 
   describe "JWT configured with custom JWT claims" $ do
     let rolesObj =
-          unObject $
-            [ "allowed" .= (["user", "editor"] :: [Text]),
-              "default" .= ("user" :: Text)
-            ]
+          unObject
+            $ [ "allowed" .= (["user", "editor"] :: [Text]),
+                "default" .= ("user" :: Text)
+              ]
         userId = unObject ["id" .= ("1" :: Text)]
         obj =
-          unObject $
-            [ "roles" .= rolesObj,
-              "user" .= userId
-            ]
+          unObject
+            $ [ "roles" .= rolesObj,
+                "user" .= userId
+              ]
         claimsSet = mkClaimsSetWithUnregisteredClaims obj
-        userIdClaim = mkSessionVariable "x-hasura-user-id"
+        userIdClaim = unsafeMkSessionVariable ("x-hasura-user-id" :: CI.CI Text)
 
     describe "custom claims with JSON paths to the claim location in the JWT token" $ do
       it "parse custom claims values, with correct values" $ do
         let customDefRoleClaim = mkCustomDefaultRoleClaim (Just "$.roles.default") Nothing
             customAllowedRolesClaim = mkCustomAllowedRoleClaim (Just "$.roles.allowed") Nothing
             otherClaims =
-              Map.fromList
+              HashMap.fromList
                 [(userIdClaim, mkCustomOtherClaim (Just "$.user.id") Nothing)]
             customClaimsMap = JWTCustomClaimsMap customDefRoleClaim customAllowedRolesClaim otherClaims
 
         parseClaimsMap_ claimsSet (JCMap customClaimsMap)
           `shouldReturn` Right
-            ( Map.fromList
+            ( HashMap.fromList
                 [ (allowedRolesClaim, J.toJSON (map mkRoleNameE ["user", "editor"])),
                   (defaultRoleClaim, J.toJSON (mkRoleNameE "user")),
                   (userIdClaim, J.String "1")
@@ -525,13 +528,13 @@ parseClaimsMapTests = describe "parseClaimMapTests" $ do
         let customDefRoleClaim = mkCustomDefaultRoleClaim (Just "$.roles.default") Nothing
             customAllowedRolesClaim = mkCustomAllowedRoleClaim (Just "$.roles.allowed") Nothing
             otherClaims =
-              Map.fromList
+              HashMap.fromList
                 [(userIdClaim, mkCustomOtherClaim (Just "$.sub") Nothing)]
             customClaimsMap = JWTCustomClaimsMap customDefRoleClaim customAllowedRolesClaim otherClaims
 
         parseClaimsMap_ (claimsSet & JWT.claimSub .~ (Just "2")) (JCMap customClaimsMap)
           `shouldReturn` Right
-            ( Map.fromList
+            ( HashMap.fromList
                 [ (allowedRolesClaim, J.toJSON (map mkRoleNameE ["user", "editor"])),
                   (defaultRoleClaim, J.toJSON (mkRoleNameE "user")),
                   (userIdClaim, J.String "2")
@@ -551,7 +554,7 @@ parseClaimsMapTests = describe "parseClaimMapTests" $ do
             customClaimsMap = JWTCustomClaimsMap customDefRoleClaim customAllowedRolesClaim mempty
         parseClaimsMap_ claimsSet (JCMap customClaimsMap)
           `shouldReturn` Right
-            ( Map.fromList
+            ( HashMap.fromList
                 [ (allowedRolesClaim, J.toJSON (map mkRoleNameE ["user", "editor"])),
                   (defaultRoleClaim, J.toJSON (mkRoleNameE "editor"))
                 ]
@@ -564,7 +567,7 @@ parseClaimsMapTests = describe "parseClaimMapTests" $ do
             customClaimsMap = JWTCustomClaimsMap customDefRoleClaim customAllowedRolesClaim mempty
         parseClaimsMap_ JWT.emptyClaimsSet (JCMap customClaimsMap)
           `shouldReturn` Right
-            ( Map.fromList
+            ( HashMap.fromList
                 [ (allowedRolesClaim, J.toJSON (map mkRoleNameE ["user", "editor"])),
                   (defaultRoleClaim, J.toJSON (mkRoleNameE "editor"))
                 ]
@@ -587,8 +590,8 @@ mkCustomAllowedRoleClaim claimPath defVal =
   case claimPath of
     Just path -> JWTCustomClaimsMapJSONPath (mkJSONPathE path) $ defAllowedRoles
     Nothing ->
-      JWTCustomClaimsMapStatic $
-        fromMaybe (mkRoleNameE <$> ["user", "editor"]) defAllowedRoles
+      JWTCustomClaimsMapStatic
+        $ fromMaybe (mkRoleNameE <$> ["user", "editor"]) defAllowedRoles
   where
     defAllowedRoles = fmap mkRoleNameE <$> defVal
 
@@ -612,40 +615,46 @@ fakeJWTConfig =
    in JWTConfig {..}
 
 fakeAuthHook :: AuthHook
-fakeAuthHook = AuthHookG "http://fake" AHTGet
+fakeAuthHook = AuthHook "http://fake" AHTGet False
 
 mkRoleNameE :: Text -> RoleName
 mkRoleNameE = fromMaybe (error "fixme") . mkRoleName
 
-mkJSONPathE :: Text -> JSONPath
-mkJSONPathE = either error id . parseJSONPath
-
-newtype NoReporter a = NoReporter {runNoReporter :: IO a}
-  deriving newtype (Functor, Applicative, Monad, MonadIO, MonadBase IO, MonadBaseControl IO)
-
-instance Tracing.HasReporter NoReporter
+mkJSONPathE :: Text -> J.JSONPath
+mkJSONPathE = either (error . T.unpack) id . parseJSONPath
 
 setupAuthMode' ::
+  ( ForkableMonadIO m
+  ) =>
   Maybe (HashSet AdminSecretHash) ->
   Maybe AuthHook ->
-  Maybe JWTConfig ->
+  [JWTConfig] ->
   Maybe RoleName ->
-  IO (Either () AuthMode)
-setupAuthMode' mAdminSecretHash mWebHook mJwtSecret mUnAuthRole =
-  -- just throw away the error message for ease of testing:
-  fmap (either (const $ Left ()) Right) $
-    runNoReporter $
-      lowerManagedT $
-        runExceptT $
-          setupAuthMode
-            (fromMaybe Set.empty mAdminSecretHash)
-            mWebHook
-            mJwtSecret
-            mUnAuthRole
-            -- NOTE: this won't do any http or launch threads if we don't specify JWT URL:
-            (error "H.Manager")
-            (Logger $ void . return)
+  m (Either () AuthMode)
+setupAuthMode' mAdminSecretHash mWebHook jwtSecrets mUnAuthRole = do
+  httpManager <- liftIO $ HTTP.newManager HTTP.defaultManagerSettings
+  fmap (mapLeft $ const ())
+    $ runExceptT
+    $ setupAuthMode
+      (fromMaybe Set.empty mAdminSecretHash)
+      mWebHook
+      jwtSecrets
+      mUnAuthRole
+      (Logger $ void . return)
+      httpManager
 
-mkClaimsSetWithUnregisteredClaims :: HashMap Text J.Value -> JWT.ClaimsSet
+setupAuthMode'E ::
+  ( ForkableMonadIO m
+  ) =>
+  Maybe (HashSet AdminSecretHash) ->
+  Maybe AuthHook ->
+  [JWTConfig] ->
+  Maybe RoleName ->
+  m AuthMode
+setupAuthMode'E a b c d =
+  either (const $ error "fixme") id
+    <$> setupAuthMode' a b c d
+
+mkClaimsSetWithUnregisteredClaims :: J.Object -> JWT.ClaimsSet
 mkClaimsSetWithUnregisteredClaims unregisteredClaims =
-  JWT.emptyClaimsSet & JWT.unregisteredClaims .~ unregisteredClaims
+  JWT.emptyClaimsSet & JWT.unregisteredClaims .~ KM.toMapText unregisteredClaims

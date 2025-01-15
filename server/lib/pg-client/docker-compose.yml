@@ -1,0 +1,14 @@
+services:
+  postgres:
+    extends:
+      file: ../../../docker-compose/databases.yaml
+      service: postgres
+    ports:
+      - "64001:5432"
+    environment:
+      POSTGRES_USER: "hasura"
+      POSTGRES_PASSWORD: "hasura"
+      POSTGRES_DB: "hasura"
+    volumes:
+        - /var/lib/postgresql/data
+

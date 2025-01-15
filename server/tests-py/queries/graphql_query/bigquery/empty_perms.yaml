@@ -6,14 +6,14 @@
     X-Hasura-Role: empty_perms
   response:
     errors:
-    - extensions:
-        path: $.selectionSet.hasura_test_article.selectionSet.id
-        code: validation-failed
-      message: "field \"id\" not found in type: 'hasura_test_article'"
+      - extensions:
+          path: $.selectionSet.hasura_article.selectionSet.id
+          code: validation-failed
+        message: "field 'id' not found in type: 'hasura_article'"
   query:
     query: |
       query {
-        hasura_test_article {
+        hasura_article {
           id
           title
           content

@@ -1,0 +1,312 @@
+# HLint configuration file
+# https://github.com/ndmitchell/hlint
+
+################################################################################
+# Global hlint configuration
+
+- arguments: [-XQuasiQuotes]
+
+
+################################################################################
+# Restrictions on functions
+
+- functions:
+
+      # Hspec restrictions
+      - name: "Test.Hspec.focus"
+        within: []
+        message: "Specs with focusing should only be used during development"
+
+      - name: "Test.Hspec.fit"
+        within: []
+        message: "Specs with focusing should only be used during development"
+
+      - name: "Test.Hspec.fspecify"
+        within: []
+        message: "Specs with focusing should only be used during development"
+
+      - name: "Test.Hspec.fdescribe"
+        within: []
+        message: "Specs with focusing should only be used during development"
+
+      - name: "Test.Hspec.fcontext"
+        within: []
+        message: "Specs with focusing should only be used during development"
+
+      - name: "Harness.TestEnvironment.testLogHarness"
+        within: []
+        message: "testLogHarness should only be ad-hoc during development. Please define proper log message data types for published code"
+
+      # Harness restrictions
+      - name: "Harness.Logging.LogHarness"
+        within: []
+        message: "LogHarness should only be ad-hoc during development. Please define proper log message data types for published code"
+
+      - name: "Harness.Logging.Messages.LogHarness"
+        within: []
+        message: "LogHarness should only be ad-hoc during development. Please define proper log message data types for published code"
+
+      - name: "Harness.TestEnvironment.testLogTrace"
+        within: ["Test.**"]
+        message: "testLogTrace should only be used outside the test-harness package"
+
+      - name: "Harness.Logging.LogTrace"
+        within: ["Test.**"]
+        message: "LogTrace should only be used outside the test-harness package"
+
+      - name: "Harness.Logging.Messages.LogTrace"
+        within: ["Test.**"]
+        message: "LogTrace should only be used outside the test-harness package"
+
+      - name: "Harness.Logging.logTrace"
+        within: ["Test.**"]
+        message: "logTrace should only be used outside the test-harness package"
+
+      - name: "Harness.Logging.Messages.logTrace"
+        within: ["Test.**"]
+        message: "logTrace should only be used outside the test-harness package"
+
+      # General restrictions
+      - name: "undefined"
+        within: []
+        message: "undefined isn't allowed"
+
+      ## Trace debugging
+      - name: "ltrace"
+        within: []
+        message: "ltrace left in code"
+      - name: "ltraceM"
+        within: []
+        message: "ltraceM left in code"
+      - name: "traceToFile"
+        within: []
+        message: "traceToFile left in code"
+      - name: "traceToFileM"
+        within: []
+        message: "traceToFileM left in code"
+
+################################################################################
+# Ignore some builtin hints
+
+- ignore: {name: Reduce duplication}
+- ignore: {name: Redundant $}
+- ignore: {name: Redundant bracket}
+- ignore: {name: Use fmap}
+- ignore: {name: Use first}
+- ignore: {name: Use if}
+- ignore: {name: Redundant <$>}
+- ignore: {name: Use ++}
+- ignore: {name: Use const}
+- ignore: {name: Eta reduce}
+- ignore: {name: Redundant multi-way if}
+- ignore: {name: Use newtype instead of data}
+- ignore: {name: Use bimap}
+- ignore: {name: Use fromRight}
+- ignore: {name: Use $>}
+- ignore: {name: Use <$>}
+- ignore: {name: "Use ?~"}
+- ignore: {name: Use <=<}
+- ignore: {name: Use sequenceA}
+- ignore: {name: Use camelCase}
+- ignore: {name: Redundant return}
+- ignore: {name: Use <$>, within: [Hasura.RQL.DDL.Metadata, Hasura.Backends.MSSQL.Types.Instances]}
+- ignore: {name: Functor law, within: Hasura.Server.AuthSpec}
+- ignore: {name: Use underscore} # suggests to format port numbers
+# These three need to be disabled under 'simplified subsumption' unfortunately.
+# If we want to use -XDeepSubsumption these can be reenabled and lints fixed
+# See: https://github.com/mpickering/ghc-proposals/blob/deep-subsumption/proposals/0000-deep-subsumption.rst
+- ignore: {name: Avoid lambda}
+- ignore: {name: Redundant lambda}
+- ignore: {name: Avoid lambda using `infix`}
+
+
+################################################################################
+# Custom rules
+
+- suggest: {lhs: onJust, rhs: for_}
+
+- group:
+    name: hasura-prelude
+    enabled: true
+    imports:
+    - package base
+    rules:
+    - error: {lhs: "a == []", rhs: "null a"}
+    - error: {lhs: "a /= []", rhs: "not (null a)"}
+    - error: {lhs: "maybe b return a", rhs: "onNothing a b"}
+    - error: {lhs: "maybe b pure a", rhs: "onNothing a b"}
+    - error: {lhs: "maybe (return ()) b a", rhs: "for_ a b"}
+    - error: {lhs: "maybe (pure ()) b a", rhs: "for_ a b"}
+    - error: {lhs: "either b return a", rhs: "onLeft a b"}
+    - error: {lhs: "either b pure a", rhs: "onLeft a b"}
+    - error: {lhs: "maybe (f x) f", rhs: "f . fromMaybe x"}
+    - error: {lhs: "maybe (f x) f", rhs: "f . fromMaybe x"}
+    - error: {lhs: "either (f . g) (f . h)", rhs: "f . either g h"}
+    - error: {lhs: "either (f . g) (f . h)", rhs: "f . either g h"}
+    - error: {lhs: "onNothing x (return y)", rhs: "return (fromMaybe y x)"}
+    - error: {lhs: "onNothing x (pure y)", rhs: "pure (fromMaybe y x)"}
+    - error: {lhs: "onLeft x (return . f)", rhs: "return (either f id x)"}
+    - error: {lhs: "onLeft x (pure . f)", rhs: "pure (either f id x)"}
+    - error: {lhs: "case x of {Right a -> pure a; Left c -> d}", rhs: "onLeft x (\\ c -> d)"}
+    - error: {lhs: "case x of {Left c -> d; Right a -> pure a}", rhs: "onLeft x (\\ c -> d)"}
+    - error: {lhs: "case x of {Right a -> return a; Left c -> d}", rhs: "onLeft x (\\ c -> d)"}
+    - error: {lhs: "case x of {Left c -> d; Right a -> return a}", rhs: "onLeft x (\\ c -> d)"}
+    - error: {lhs: "case x of {Nothing -> a; Just b -> pure b}", rhs: "onNothing x a"}
+    - error: {lhs: "case x of {Just b -> pure b; Nothing -> a}", rhs: "onNothing x a"}
+    - error: {lhs: "case x of {Nothing -> a; Just b -> return b}", rhs: "onNothing x a"}
+    - error: {lhs: "case x of {Just b -> return b; Nothing -> a}", rhs: "onNothing x a"}
+    - error: {lhs: "if x then pure (); else y", rhs: "unless x y"}
+    - error: {lhs: "if x then return (); else y", rhs: "unless x y"}
+    - error: {lhs: "if x then y; else pure ()", rhs: "when x y"}
+    - error: {lhs: "if x then y; else return ()", rhs: "when x y"}
+    - error: {lhs: "unless (not x)", rhs: "when x"}
+    - error: {lhs: "when (not x)", rhs: "unless x"}
+    - error: {lhs: "arr id", rhs: "returnA"}
+    - suggest: {lhs: "not x && not y", rhs: "not (x || y)"}
+    - suggest: {lhs: "not x || not y", rhs: "not (x && y)"}
+    - error: {lhs: "Data.Text.pack (Prelude.show x)", rhs: "Hasura.Prelude.tshow x"}
+    - error: {lhs: "map f xs == map f ys",   rhs: "liftEq ((==) `on` f)", note: "This is liable to be faster"}
+    - suggest: {lhs: "fmap f xs == fmap f ys", rhs: "liftEq ((==) `on` f)", note: "This is liable to be faster"}
+    # mapKeys:
+    - error: {lhs: "Data.HashMap.Strict.Extended.fromList . map (first f) . Data.HashMap.Strict.Extended.toList", rhs: "mapKeys f"}
+    - error: {lhs: "Data.HashMap.Strict.fromList . map (first f) . Data.HashMap.Strict.toList", rhs: "mapKeys f"}
+    - error: {lhs: "Data.HashMap.Strict.Extended.fromList $ map (first f) $ Data.HashMap.Strict.Extended.toList x", rhs: "mapKeys f x"}
+    - error: {lhs: "Data.HashMap.Strict.fromList $ map (first f) $ Data.HashMap.Strict.toList x", rhs: "mapKeys f x"}
+    # MaybeT
+    - error: {lhs: "MaybeT (pure x)",         rhs: "hoistMaybe x"}
+    - error: {lhs: "MaybeT (return x)",       rhs: "hoistMaybe x"}
+    - error: {lhs: "MaybeT (pure Nothing)",   rhs: "Control.Applicative.empty"}
+    - error: {lhs: "MaybeT (return Nothing)", rhs: "Control.Applicative.empty"}
+    # catMaybes
+    - error: {lhs: "Data.HashMap.Strict.mapMaybe id", rhs: "Data.HashMap.Strict.Extended.catMaybes"}
+    - error: {lhs: "Data.HashMap.Strict.Extended.mapMaybe id", rhs: "Data.HashMap.Strict.Extended.catMaybes"}
+    - error: {lhs: "Data.HashMap.Strict.InsOrd.mapMaybe id", rhs: "Data.HashMap.Strict.InsOrd.Extended.catMaybes"}
+    - error: {lhs: "Data.HashMap.Strict.InsOrd.Extended.mapMaybe id", rhs: "Data.HashMap.Strict.InsOrd.Extended.catMaybes"}
+    - error: {lhs: "Data.IntMap.Strict.mapMaybe id", rhs: "Data.HashMap.Strict.Extended.catMaybes"}
+    - error: {lhs: "Data.IntMap.Strict.Extended.mapMaybe id", rhs: "Data.HashMap.Strict.Extended.catMaybes"}
+
+- group:
+    name: data-text-extended
+    enabled: true
+    imports:
+    - package base
+    rules:
+    - error: {lhs: "Data.Text.intercalate \", \" x", rhs: "commaSeparated x", note: "From Data.Text.Extended"}
+    - error: {lhs: "Data.Text.Extended.intercalate \", \" x", rhs: "commaSeparated x"}
+
+- group:
+    name: mssql-transaction
+    enabled: true
+    imports:
+    - package base
+    rules:
+    - error: {lhs: "Database.MSSQL.runTxE id tx pool", rhs: "Database.MSSQL.runTx tx pool"}
+    - error: {lhs: "Database.MSSQL.unitQueryE id q", rhs: "Database.MSSQL.unitQuery q"}
+    - error: {lhs: "Database.MSSQL.singleRowQueryE id tx pool", rhs: "Database.MSSQL.singleRowQuery tx pool"}
+    - error: {lhs: "Database.MSSQL.multiRowQueryE id tx pool", rhs: "Database.MSSQL.multiRowQuery tx pool"}
+
+- group:
+    name: unsafe
+    enabled: true
+    imports:
+      - package base
+    rules:
+      - error:
+          name: "avoid Language.GraphQL.Draft.Syntax.unsafeMkName"
+          lhs: "Language.GraphQL.Draft.Syntax.unsafeMkName"
+          rhs: "Language.GraphQL.Draft.Syntax.mkName"
+          note: "avoid unsafeMkName if possible"
+      - error:
+          name: "avoid Control.Concurrent.threadDelay"
+          lhs: "Control.Concurrent.threadDelay"
+          rhs: "Control.Concurrent.Extended.sleep"
+          note: "Please use `sleep` instead (and read the docs!)"
+      - error:
+          name: "avoid InsecurelyShowDetails"
+          lhs: "Hasura.Backends.BigQuery.Execute.InsecurelyShowDetails"
+          rhs: "Hasura.Backends.BigQuery.Execute.HideDetails"
+          note: "Using 'InsecurelyShowDetails' could potentially expose sensitive information."
+      - suggest:
+          name: "avoid Control.Concurrent.Async.Lifted.Safe.async"
+          lhs: "Control.Concurrent.Async.Lifted.Safe.async"
+          rhs: "Control.Concurrent.Async.Lifted.Safe.withAsync"
+          note: "Please use 'Control.Control.Concurrent.Async.Lifted.Safe.withAsync' or our 'forkImmortal' instead for more robust threading."
+      - suggest:
+          name: "avoid Control.Concurrent.forkIO"
+          lhs: "Control.Concurrent.forkIO"
+          rhs: "Control.Concurrent.Async.Lifted.Safe.withAsync"
+          note: "Please use 'Control.Control.Concurrent.Async.Lifted.Safe.withAsync' or our 'forkImmortal' instead for more robust threading."
+      - suggest:
+          name: "avoid getEnvironment"
+          lhs: "System.Environment.getEnvironment"
+          rhs: "env_from_function_argument"
+          note: "Instead of 'getEnvironment', use the environment from the server context, typically accessible as a function argument"
+      - suggest:
+          name: "avoid getEnvironment"
+          lhs: "Data.Environment.getEnvironment"
+          rhs:  "env_from_function_argument"
+          note: "Instead of 'getEnvironment', use the environment from the server context, typically accessible as a function argument"
+
+
+################################################################################
+# Exceptions to our own rules
+
+- ignore:
+    within: ["Harness.**", "Spec", "Spec.**", "SpecHook", "Test.**", "Hasura.QuickCheck.**"]
+    name:
+      - "avoid Control.Concurrent.threadDelay"
+      - "avoid Control.Concurrent.Async.Lifted.Safe.async"
+      - "avoid Control.Concurrent.forkIO"
+      - "avoid getEnvironment"
+      - "avoid Language.GraphQL.Draft.Syntax.unsafeMkName"
+
+- ignore:
+    within: ["Language.GraphQL.Draft.**"]
+    name: "avoid Language.GraphQL.Draft.Syntax.unsafeMkName"
+
+
+################################################################################
+# Import conventions
+
+- modules:
+  - name:
+    - Data.Aeson
+    - Data.Aeson.Extended
+    as: J
+  - name:
+    - Data.HashMap.Strict
+    - Data.HashMap.Strict.Extended
+    as: HashMap
+  - name:
+    - Data.HashMap.Strict.InsOrd
+    - Data.HashMap.Strict.InsOrd.Extended
+    as: InsOrdHashMap
+
+################################################################################
+# Import restrictions
+
+# We limit the place where the module `Hasura.RQL.Types.Instances` can be
+# imported in order to make it easier to avoid module cycles.
+#
+# This check is initially quite limited, and will need to be extended to cover
+# other instance-defining modules as well:
+#
+#  * RQL.Types.Metadata.Instances
+#  * Hasura.GraphQL.Transport.Instances
+#  * Hasura.GraphQL.Execute.Instances
+#  * Hasura.GraphQL.Schema.Instances
+#  * Hasura.Server.API.Instances
+#  * Hasura.RQL.Types.SchemaCache.Instances
+
+- modules:
+    - name: Hasura.RQL.Types.Instances
+      within: [
+                Hasura.RQL.IR.Select,
+                Hasura.RQL.Types.Metadata.Object,
+                Hasura.RQL.Types.Relationships.Remote,
+                Hasura.RQL.Types.SchemaCacheTypes,
+                Hasura.RQL.Types.Source,
+                Hasura.GraphQL.Schema.Build.UpdateSpec,
+                Test.Parser.Delete,
+                Test.Parser.Internal
+              ]

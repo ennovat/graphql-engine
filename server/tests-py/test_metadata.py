@@ -1,7 +1,7 @@
-import ruamel.yaml as yaml
-from validate import check_query_f
-import pytest
 import os
+import pytest
+
+from validate import check_query_f
 
 usefixtures = pytest.mark.usefixtures
 
@@ -11,7 +11,7 @@ use_mutation_fixtures = usefixtures(
 )
 
 
-@usefixtures('per_method_tests_db_state')
+@usefixtures('gql_server', 'per_method_tests_db_state')
 class TestMetadata:
 
     def test_reload_metadata(self, hge_ctx):
@@ -47,16 +47,15 @@ class TestMetadata:
                       '/replace_metadata_allow_inconsistent.yaml')
 
     def test_replace_metadata_disallow_inconsistent_metadata(self, hge_ctx):
-        st_code, resp = hge_ctx.v1metadataq({"type": "export_metadata", "args": {}})
-        assert st_code == 200, resp
+        resp = hge_ctx.v1metadataq({"type": "export_metadata", "args": {}})
         default_source_config = {}
         default_source = list(filter(lambda source: (source["name"] == "default"), resp["sources"]))
         if default_source:
             default_source_config = default_source[0]["configuration"]
         else:
             assert False, "default source config not found"
-            return
-        st_code, resp = hge_ctx.v1metadataq({
+        resp = hge_ctx.v1metadataq(
+            {
                "type": "replace_metadata",
                "version": 2,
                "args": {
@@ -116,8 +115,9 @@ class TestMetadata:
                    ]
                  }
                }
-             })
-        assert st_code == 400, resp
+             },
+            expected_status_code = 400
+        )
         assert resp == {
             "internal": [
                 {
@@ -136,14 +136,161 @@ class TestMetadata:
             "code": "unexpected"
         }
 
+    """Test that missing "kind" key in metadata source defaults to "postgres".
+    Regression test for https://github.com/hasura/graphql-engine-mono/issues/4501"""
+    def test_replace_metadata_default_kind(self, hge_ctx):
+        resp = hge_ctx.v1metadataq({"type": "export_metadata", "args": {}})
+        default_source_config = {}
+        default_source = list(filter(lambda source: (source["name"] == "default"), resp["sources"]))
+        if default_source:
+            default_source_config = default_source[0]["configuration"]
+        else:
+            assert False, "default source config not found"
+        hge_ctx.v1metadataq({
+               "type": "replace_metadata",
+               "version": 2,
+               "args": {
+                 "metadata": {
+                   "version": 3,
+                   "sources": [
+                     {
+                       "name": "default",
+                       "tables": [],
+                       "configuration": default_source_config
+                     }
+                   ]
+                 }
+               }
+             })
+        resp = hge_ctx.v1metadataq({"type": "export_metadata", "args": {}})
+        assert resp["sources"][0]["kind"] == "postgres"
+
     def test_dump_internal_state(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/dump_internal_state.yaml')
 
     def test_pg_add_source(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/pg_add_source.yaml')
 
+    def test_pg_add_source_with_replace_config(self, hge_ctx):
+        hge_ctx.v1metadataq({
+              "type": "pg_add_source",
+              "args": {
+                "name": "pg1",
+                "configuration": {
+                  "connection_info": {
+                    "database_url": {
+                      "from_env": "HASURA_GRAPHQL_PG_SOURCE_URL_1"
+                    }
+                  }
+                }
+              }
+            })
+        hge_ctx.v1metadataq({
+              "type": "pg_add_source",
+              "args": {
+                "name": "pg1",
+                "configuration": {
+                  "connection_info": {
+                    "database_url": {
+                      "from_env": "HASURA_GRAPHQL_PG_SOURCE_URL_1"
+                    }
+                  }
+                },
+                "customization": {
+                  "root_fields": {
+                    "namespace": "some_namespace"
+                  }
+                },
+                "replace_configuration": True
+              }
+            })
+        resp = hge_ctx.v1metadataq({"type": "export_metadata", "args": {}})
+        assert resp["sources"][1]["customization"]["root_fields"]["namespace"] == "some_namespace"
+        hge_ctx.v1metadataq({
+              "type": "pg_drop_source",
+              "args": {
+                "name": "pg1"
+              }
+            })
+
+    def test_pg_update_unknown_source(self, hge_ctx):
+        resp = hge_ctx.v1metadataq(
+            {
+              "type": "pg_update_source",
+              "args": {
+                "name": "pg-not-previously-added",
+                "configuration": {
+                  "connection_info": {
+                    "database_url": {
+                      "from_env": "HASURA_GRAPHQL_PG_SOURCE_URL_1"
+                    }
+                  }
+                }
+              }
+            },
+            expected_status_code = 400
+        )
+        assert resp["error"] == "source with name \"pg-not-previously-added\" does not exist"
+
+    def test_pg_update_source(self, hge_ctx):
+        hge_ctx.v1metadataq({
+              "type": "pg_add_source",
+              "args": {
+                "name": "pg1",
+                "configuration": {
+                  "connection_info": {
+                    "database_url": {
+                      "from_env": "HASURA_GRAPHQL_PG_SOURCE_URL_1"
+                    },
+                    "pool_settings": {
+                      "max_connections": 10
+                    }
+                  }
+                }
+              }
+            })
+        hge_ctx.v1metadataq({
+              "type": "pg_update_source",
+              "args": {
+                "name": "pg1",
+                "customization": {
+                  "root_fields": {
+                    "namespace": "some_namespace"
+                  }
+                }
+              }
+            })
+        resp = hge_ctx.v1metadataq({"type": "export_metadata", "args": {}})
+        assert resp["sources"][1]["customization"]["root_fields"]["namespace"] == "some_namespace"
+        assert resp["sources"][1]["configuration"]["connection_info"]["pool_settings"]["max_connections"] == 10
+        hge_ctx.v1metadataq({
+              "type": "pg_update_source",
+              "args": {
+                "name": "pg1",
+                "configuration": {
+                  "connection_info": {
+                    "database_url": {
+                      "from_env": "HASURA_GRAPHQL_PG_SOURCE_URL_1"
+                    },
+                    "pool_settings": {
+                      "max_connections": 50
+                    }
+                  }
+                }
+              }
+            })
+        resp = hge_ctx.v1metadataq({"type": "export_metadata", "args": {}})
+        assert resp["sources"][1]["customization"]["root_fields"]["namespace"] == "some_namespace"
+        assert resp["sources"][1]["configuration"]["connection_info"]["pool_settings"]["max_connections"] == 50
+        hge_ctx.v1metadataq({
+              "type": "pg_drop_source",
+              "args": {
+                "name": "pg1"
+              }
+            })
+
     @pytest.mark.skipif(
-        os.getenv('HASURA_GRAPHQL_PG_SOURCE_URL_1') != 'postgresql://gql_test@localhost:5432/pg_source_1',
+        os.getenv('HASURA_GRAPHQL_PG_SOURCE_URL_1') != 'postgresql://gql_test:gql_test@localhost:5432/pg_source_1',
         reason="This test relies on hardcoded connection parameters that match Circle's setup.")
     def test_pg_add_source_with_source_parameters(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/pg_add_source_with_parameters.yaml')
@@ -203,8 +350,8 @@ class TestMetadata:
         if hge_ctx.hge_key is not None:
             headers['x-hasura-admin-secret'] = hge_ctx.hge_key
 
-        st, resp, _ = hge_ctx.anyq(url, query, headers)
-        assert st == 200, resp
+        status_code, resp, _ = hge_ctx.anyq(url, query, headers)
+        assert status_code == 200, f'Expected {status_code} to be 200. Response:\n{resp}'
 
         fn_name = 'search_authors_s1'
         fn_description = 'this function helps fetch articles based on the title'
@@ -223,6 +370,15 @@ class TestMetadata:
     def test_webhook_transform_success(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/test_webhook_transform_success.yaml')
 
+    def test_webhook_transform_success_remove_body(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/test_webhook_transform_success_remove_body.yaml')
+
+    def test_webhook_transform_success_old_body_schema(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/test_webhook_transform_success_old_body_schema.yaml')
+
+    def test_webhook_transform_success_form_urlencoded(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/test_webhook_transform_success_form_urlencoded.yaml')
+
     def test_webhook_transform_with_url_env_reference_success(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/test_webhook_transform_env_reference_success.yaml')
 
@@ -231,6 +387,9 @@ class TestMetadata:
 
     def test_webhook_transform_bad_eval(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/test_webhook_transform_bad_eval.yaml')
+
+    def test_webhook_transform_custom_functions(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/test_webhook_transform_custom_functions.yaml')
 
     @pytest.mark.skipif(
         os.getenv('HASURA_GRAPHQL_PG_SOURCE_URL_1') == os.getenv('HASURA_GRAPHQL_PG_SOURCE_URL_2') or
@@ -440,9 +599,9 @@ class TestMetadataOrder:
         assert export_resp['resource_version'] == export_resp_1['resource_version']
 
 
-@pytest.mark.parametrize("backend", ['citus', 'mssql', 'postgres', 'bigquery'])
+@pytest.mark.backend('citus', 'mssql', 'postgres', 'bigquery')
 @usefixtures('per_class_tests_db_state')
-class TestSetTableCustomizationCommon:
+class TestSetTableCustomizationPostgresMSSQLCitusBigquery:
 
     @classmethod
     def dir(cls):
@@ -451,7 +610,7 @@ class TestSetTableCustomizationCommon:
     def test_set_table_customization(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + hge_ctx.backend_suffix('/set_table_customization') + '.yaml')
 
-@pytest.mark.parametrize("backend", ['bigquery'])
+@pytest.mark.backend('bigquery')
 @usefixtures('per_method_tests_db_state')
 class TestMetadataBigquery:
 

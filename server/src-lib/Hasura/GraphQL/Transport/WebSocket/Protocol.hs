@@ -15,23 +15,25 @@ module Hasura.GraphQL.Transport.WebSocket.Protocol
     ServerMsgType (..),
     StartMsg (StartMsg),
     StopMsg (StopMsg),
-    WSConnInitTimerStatus (Done),
+    WSConnInitTimeoutStatus (..),
+    WSConnInitTimeout,
     WSSubProtocol (..),
     encodeServerErrorMsg,
     encodeServerMsg,
-    getNewWSTimer,
-    getWSTimerState,
     keepAliveMessage,
     showSubProtocol,
     toWSSubProtocol,
+    newWSConnInitTimeout,
+    runTimer,
+
+    -- * exported for testing
+    unsafeMkOperationId,
   )
 where
 
-import Control.Concurrent
 import Control.Concurrent.Extended (sleep)
 import Control.Concurrent.STM
 import Data.Aeson qualified as J
-import Data.Aeson.TH qualified as J
 import Data.ByteString.Lazy qualified as BL
 import Data.Text (pack)
 import Hasura.EncJSON
@@ -60,6 +62,9 @@ toWSSubProtocol str = case str of
 -- This is set by the client when it connects to the server
 newtype OperationId = OperationId {unOperationId :: Text}
   deriving (Show, Eq, J.ToJSON, J.FromJSON, IsString, Hashable)
+
+unsafeMkOperationId :: Text -> OperationId
+unsafeMkOperationId = OperationId
 
 data ServerMsgType
   = -- specific to `Apollo` clients
@@ -96,32 +101,52 @@ instance J.ToJSON ServerMsgType where
 
 data ConnParams = ConnParams
   {_cpHeaders :: Maybe (HashMap Text Text)}
-  deriving stock (Show, Eq)
+  deriving stock (Show, Eq, Generic)
 
-$(J.deriveJSON hasuraJSON ''ConnParams)
+instance J.FromJSON ConnParams where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON ConnParams where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 data StartMsg = StartMsg
   { _smId :: !OperationId,
     _smPayload :: !GQLReqUnparsed
   }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic)
 
-$(J.deriveJSON hasuraJSON ''StartMsg)
+instance J.FromJSON StartMsg where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON StartMsg where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 data StopMsg = StopMsg
   { _stId :: OperationId
   }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic)
 
-$(J.deriveJSON hasuraJSON ''StopMsg)
+instance J.FromJSON StopMsg where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON StopMsg where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 -- Specific to graphql-ws
 data PingPongPayload = PingPongPayload
   { _smMessage :: !(Maybe Text) -- NOTE: this is not within the spec, but is specific to our usecase
   }
-  deriving stock (Show, Eq)
+  deriving stock (Show, Eq, Generic)
 
-$(J.deriveJSON hasuraJSON ''PingPongPayload)
+instance J.FromJSON PingPongPayload where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON PingPongPayload where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 -- Specific to graphql-ws
 keepAliveMessage :: PingPongPayload
@@ -132,9 +157,14 @@ data SubscribeMsg = SubscribeMsg
   { _subId :: !OperationId,
     _subPayload :: !GQLReqUnparsed
   }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic)
 
-$(J.deriveJSON hasuraJSON ''SubscribeMsg)
+instance J.FromJSON SubscribeMsg where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON SubscribeMsg where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 data ClientMsg
   = CMConnInit !(Maybe ConnParams)
@@ -173,7 +203,7 @@ data DataMsg = DataMsg
 
 data ErrorMsg = ErrorMsg
   { _emId :: !OperationId,
-    _emPayload :: !J.Value
+    _emPayload :: !J.Encoding
   }
   deriving (Show, Eq)
 
@@ -191,9 +221,14 @@ newtype ConnErrMsg = ConnErrMsg {unConnErrMsg :: Text}
   deriving (Show, Eq, J.ToJSON, J.FromJSON, IsString)
 
 data ServerErrorMsg = ServerErrorMsg {unServerErrorMsg :: Text}
-  deriving stock (Show, Eq)
+  deriving stock (Show, Eq, Generic)
 
-$(J.deriveJSON hasuraJSON ''ServerErrorMsg)
+instance J.FromJSON ServerErrorMsg where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON ServerErrorMsg where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 data ServerMsg
   = SMConnAck
@@ -233,8 +268,9 @@ encodeServerErrorMsg ecode = encJToLBS . encJFromJValue $ case ecode of
 
 encodeServerMsg :: ServerMsg -> BL.ByteString
 encodeServerMsg msg =
-  encJToLBS $
-    encJFromAssocList $ case msg of
+  encJToLBS
+    $ encJFromAssocList
+    $ case msg of
       SMConnAck ->
         [encTy SMT_GQL_CONNECTION_ACK]
       SMConnKeepAlive ->
@@ -251,7 +287,7 @@ encodeServerMsg msg =
       SMErr (ErrorMsg opId payload) ->
         [ encTy SMT_GQL_ERROR,
           ("id", encJFromJValue opId),
-          ("payload", encJFromJValue payload)
+          ("payload", encJFromJEncoding payload)
         ]
       SMComplete compMsg ->
         [ encTy SMT_GQL_COMPLETE,
@@ -276,29 +312,25 @@ encodeServerMsg msg =
         ]
       Nothing -> [encTy msgType]
 
--- This "timer" is necessary while initialising the connection
--- with the server. Also, this is specific to the GraphQL-WS protocol.
-data WSConnInitTimerStatus = Running | Done
+-- Status for connection initialisation in sub-protocol
+-- This is used to timeout the 'connection_init' message sent by the client
+data WSConnInitTimeoutStatus = Initialized | TimedOut
   deriving stock (Show, Eq)
 
-type WSConnInitTimer = (TVar WSConnInitTimerStatus, TMVar ())
+type WSConnInitTimeout = TMVar WSConnInitTimeoutStatus
 
-getWSTimerState :: WSConnInitTimer -> IO WSConnInitTimerStatus
-getWSTimerState (timerState, _) = readTVarIO timerState
+newWSConnInitTimeout :: IO WSConnInitTimeout
+newWSConnInitTimeout = newEmptyTMVarIO
 
-getNewWSTimer :: Seconds -> IO WSConnInitTimer
-getNewWSTimer timeout = do
-  timerState <- newTVarIO Running
-  timer <- newEmptyTMVarIO
-  void $
-    forkIO $ do
-      sleep (seconds timeout)
-      atomically $ do
-        runTimerState <- readTVar timerState
-        case runTimerState of
-          Running -> do
-            -- time's up, we set status to "Done"
-            writeTVar timerState Done
-            putTMVar timer ()
-          Done -> pure ()
-  pure (timerState, timer)
+-- | Run the timer for the given timeout duration
+runTimer :: Seconds -> WSConnInitTimeout -> IO ()
+runTimer timeout timer = do
+  -- sleep for the timeout duration
+  sleep (seconds timeout)
+  atomically $ do
+    -- check the status of the timer
+    timerState <- tryReadTMVar timer
+    -- if the timer is not set, set it to 'TimedOut'
+    case timerState of
+      Nothing -> writeTMVar timer TimedOut
+      Just _ -> pure ()

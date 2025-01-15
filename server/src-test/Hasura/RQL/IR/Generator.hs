@@ -1,4 +1,6 @@
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+
+{-# HLINT ignore "avoid Language.GraphQL.Draft.Syntax.unsafeMkName" #-}
 
 -- | This module provides generators for the IR query selection type.
 --
@@ -7,592 +9,151 @@
 -- This is different from lifting the constructor because we distribute these
 -- low-level generators through.
 module Hasura.RQL.IR.Generator
-  ( genAnnSelectG,
-    genSelectFromG,
-    genTablePermG,
-    genSelectArgsG,
+  ( genAnnBoolExp,
+    genAnnBoolExpFld,
+    genAnnRedactionExp,
+    genAnnotatedOrderByItemG,
+    genAnnotatedOrderByElement,
+    genAnnotatedAggregateOrderBy,
+    genColumnInfo,
     genFields,
+    genFunctionArgsExpG,
+    genIdentifier,
+    genInsertOrder,
+    genRelName,
+    genRelType,
   )
 where
 
-import Data.Int (Int64)
+import Hasura.Backends.Postgres.RQLGenerator.GenAssociatedTypes qualified as Assoc
+import Hasura.Function.Cache
 import Hasura.Generator.Common
+import Hasura.NativeQuery.Types (NativeQueryName (..))
 import Hasura.Prelude hiding (bool, choice, maybe, nonEmpty)
-import Hasura.RQL.IR.OrderBy (OrderByItemG (OrderByItemG))
+import Hasura.RQL.IR.BoolExp
+import Hasura.RQL.IR.OrderBy
 import Hasura.RQL.IR.Select
-import Hasura.RQL.Types
+import Hasura.RQL.Types.Backend
+import Hasura.RQL.Types.Column
+import Hasura.RQL.Types.Common
+import Hasura.RQL.Types.ComputedField
+import Hasura.RQL.Types.Relationships.Local
 import Hedgehog
 import Hedgehog.Gen
-
--- | Given the required backend-specific generators, generate the IR representation
--- of a selection query.
--- The expectation is that backend-specific generator modules will specialise and
--- fully apply this function.
---
--- This generator shrinks "stringify nums" to 'False'. For more details on this
--- generator, see: 'genFieds', 'genSelectFromG', 'genTablePermG', 'genSeletArgsG'.
-genAnnSelectG ::
-  forall m b r f a.
-  MonadGen m =>
-  Eq (ScalarType b) =>
-  Eq (Column b) =>
-  Hashable (ScalarType b) =>
-  Hashable (Column b) =>
-  m (TableName b) ->
-  m (FunctionName b) ->
-  m (Column b) ->
-  m (ScalarType b) ->
-  m (XComputedField b) ->
-  m (BooleanOperators b a) ->
-  m (BasicOrderType b) ->
-  m (NullsOrderType b) ->
-  m a ->
-  m (f a) ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int64 ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  m (AnnSelectG b r f a)
-genAnnSelectG
-  genTableName
-  genFunctionName
-  genColumn
-  genScalarType
-  genXComputedField
-  genBooleanOperators
-  genBasicOrderType
-  genNullsOrderType
-  genA
-  genFA
-  fieldNameRange
-  fieldsRange
-  tablePermLimitRange
-  nameRange
-  hashRange
-  enumRange
-  valueInfoRange
-  descriptionRange
-  relInfoMappingRange
-  scalarRange
-  castRange
-  castOpRange
-  functionDefinitionListRange
-  funArgPositionalRange
-  funArgsNameRange
-  funArgsNamedRange
-  orderByRange
-  limitRange
-  offsetRange
-  distinctRange
-  opNameRange
-  andRange
-  orRange
-  columnRange
-  columnPositionRange =
-    AnnSelectG
-      <$> genFields genFA fieldsRange fieldNameRange
-      <*> genFrom
-      <*> genPerm
-      <*> genArgs
-      <*> bool
-    where
-      genFrom =
-        genSelectFromG
-          genTableName
-          genFunctionName
-          genColumn
-          genScalarType
-          genA
-          nameRange
-          functionDefinitionListRange
-          funArgPositionalRange
-          funArgsNameRange
-          funArgsNamedRange
-      genPerm =
-        genTablePermG
-          genColumn
-          genTableName
-          genScalarType
-          genFunctionName
-          genXComputedField
-          genBooleanOperators
-          genA
-          fieldNameRange
-          tablePermLimitRange
-          nameRange
-          hashRange
-          enumRange
-          valueInfoRange
-          descriptionRange
-          relInfoMappingRange
-          scalarRange
-          castRange
-          castOpRange
-          andRange
-          orRange
-          columnRange
-          columnPositionRange
-      genArgs =
-        genSelectArgsG
-          genColumn
-          genTableName
-          genScalarType
-          genFunctionName
-          genXComputedField
-          genBooleanOperators
-          genBasicOrderType
-          genNullsOrderType
-          genA
-          fieldNameRange
-          nameRange
-          hashRange
-          enumRange
-          valueInfoRange
-          descriptionRange
-          relInfoMappingRange
-          scalarRange
-          castRange
-          castOpRange
-          orderByRange
-          limitRange
-          offsetRange
-          distinctRange
-          funArgPositionalRange
-          funArgsNameRange
-          funArgsNamedRange
-          opNameRange
-          andRange
-          orRange
-          columnRange
-          columnPositionRange
+import Language.GraphQL.Draft.Syntax qualified as G
 
 -- | Generate a list of pairs of field names and 'a's.
 --
 -- | See 'genFieldName' for details on generating field names.
-genFields :: MonadGen m => m a -> Range Int -> Range Int -> m (Fields a)
+genFields :: (MonadGen m) => m a -> Range Int -> Range Int -> m (Fields a)
 genFields genA fieldsRange fieldNameRange =
   list fieldsRange $ (,) <$> genFieldName fieldNameRange <*> genA
 
--- | Generate a FROM clause for queries.
--- The range decides how big the definition list is for selecting from functions.
---
--- See 'genFunctionArgsExpG', 'genArgumentExp' for details.
-genSelectFromG ::
-  forall b a m.
-  MonadGen m =>
-  m (TableName b) ->
-  m (FunctionName b) ->
-  m (Column b) ->
-  m (ScalarType b) ->
+genFunctionArgsExpG ::
+  (MonadGen m) =>
   m a ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  m (SelectFromG b a)
-genSelectFromG
-  genTableName
-  genFunctionName
-  genColumn
-  genScalarType
-  genA
-  nameRange
-  funDefinitionListRange
-  funArgPositionalRange
-  funArgsNameRange
-  funArgsNamedRange =
-    choice [fromTable, fromIdentifier, fromFunction]
-    where
-      fromTable = FromTable <$> genTableName
-      fromIdentifier = FromIdentifier <$> genIdentifier nameRange
-      fromFunction =
-        FromFunction
-          <$> genFunctionName
-          <*> genFunctionArgsExpG
-            (genArgumentExp genA)
-            funArgPositionalRange
-            funArgsNameRange
-            funArgsNamedRange
-          <*> genDefList
-      genDefList =
-        maybe
-          . list funDefinitionListRange
-          $ (,) <$> genColumn <*> genScalarType
+  m (FunctionArgsExpG a)
+genFunctionArgsExpG genA =
+  FunctionArgsExp
+    <$> list defaultRange genA
+    <*> genHashMap (genArbitraryUnicodeText defaultRange) genA defaultRange
 
--- | Generate table permissions: filter and limit.
--- Range determines the limit used.
---
--- See 'genAnnBoolExp', 'genAnnBoolExpFld' for details.
-genTablePermG ::
-  MonadGen m =>
-  Eq (ScalarType b) =>
-  Eq (Column b) =>
-  Hashable (ScalarType b) =>
-  Hashable (Column b) =>
+genAnnRedactionExp ::
+  (MonadGen m) =>
+  (Hashable (ScalarType b)) =>
+  (Hashable (Column b)) =>
+  (Hashable (ColumnPath b)) =>
   m (Column b) ->
-  m (TableName b) ->
-  m (ScalarType b) ->
-  m (FunctionName b) ->
-  m (XComputedField b) ->
-  m (BooleanOperators b v) ->
-  m v ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  m (TablePermG b v)
-genTablePermG
-  genColumn
-  genTableName
-  genScalarType
-  genFunctionName
-  genXComputedField
-  genBooleanOperators
-  genV
-  fieldNameRange
-  limitRange
-  nameRange
-  hashRange
-  enumRange
-  valueInfoRange
-  descriptionRange
-  relInfoMappingRange
-  scalarRange
-  castRange
-  castOpRange
-  andRange
-  orRange
-  columnRange
-  columnPositionRange =
-    TablePerm
-      <$> genAnnBoolExp
-        ( genAnnBoolExpFld
-            genColumn
-            genTableName
-            genScalarType
-            genFunctionName
-            genXComputedField
-            genBooleanOperators
-            genV
-            fieldNameRange
-            nameRange
-            hashRange
-            enumRange
-            valueInfoRange
-            descriptionRange
-            relInfoMappingRange
-            scalarRange
-            castRange
-            castOpRange
-            andRange
-            orRange
-            columnRange
-            columnPositionRange
-        )
-        genTableName
-        andRange
-        orRange
-      <*> maybe (integral limitRange)
-
--- | Generate selection arguments (WHERE, ORDER BY, LIMIT, OFFSET, DISTINCT
--- clauses).
--- Ranges determine the number of elements we order by, the limit, offset,
--- and distinct elements.
---
--- See 'genAnnBoolExp', 'genAnnBoolExpFld', 'genAnnotatedOrderByItemG',
--- 'genAnnotatedOrderByElement' for more details.
-genSelectArgsG ::
-  forall b m a.
-  MonadGen m =>
-  Eq (ScalarType b) =>
-  Eq (Column b) =>
-  Hashable (ScalarType b) =>
-  Hashable (Column b) =>
-  m (Column b) ->
+  m (ColumnPath b) ->
   m (TableName b) ->
   m (ScalarType b) ->
   m (FunctionName b) ->
   m (XComputedField b) ->
   m (BooleanOperators b a) ->
-  m (BasicOrderType b) ->
-  m (NullsOrderType b) ->
+  m (FunctionArgumentExp b a) ->
   m a ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int64 ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  m (SelectArgsG b a)
-genSelectArgsG
+  m (AnnRedactionExp b a)
+genAnnRedactionExp
   genColumn
+  genColumnPath
   genTableName
   genScalarType
   genFunctionName
   genXComputedField
   genBooleanOperators
-  genBasicOrderType
-  genNullsOrderType
-  genA
-  fieldNameRange
-  nameRange
-  hashRange
-  enumRange
-  valueInfoRange
-  descriptionRange
-  relInfoMappingRange
-  scalarRange
-  castRange
-  castOpRange
-  orderByRange
-  limitRange
-  offsetRange
-  distinctRange
-  funcArgPosRange
-  funcArgNameRange
-  funcArgNamedRange
-  opNameRange
-  andRange
-  orRange
-  columnRange
-  columnPositionRange =
-    SelectArgs
-      <$> where'
-      <*> orderBy
-      <*> limit
-      <*> offset
-      <*> distinct
-    where
-      where' :: m (Maybe (AnnBoolExp b a))
-      where' =
-        maybe $
-          genAnnBoolExp
+  genFunctionArgumentExp
+  genA =
+    recursive
+      choice
+      [pure NoRedaction]
+      [ RedactIfFalse
+          <$> genAnnBoolExp
             ( genAnnBoolExpFld
                 genColumn
+                genColumnPath
                 genTableName
                 genScalarType
                 genFunctionName
                 genXComputedField
                 genBooleanOperators
+                genFunctionArgumentExp
                 genA
-                fieldNameRange
-                nameRange
-                hashRange
-                enumRange
-                valueInfoRange
-                descriptionRange
-                relInfoMappingRange
-                scalarRange
-                castRange
-                castOpRange
-                andRange
-                orRange
-                columnRange
-                columnPositionRange
             )
             genTableName
-            andRange
-            orRange
-
-      orderBy :: m (Maybe (NonEmpty (AnnotatedOrderByItemG b a)))
-      orderBy =
-        maybe . nonEmpty orderByRange $
-          genAnnotatedOrderByItemG
-            genBasicOrderType
-            genNullsOrderType
-            ( genAnnotatedOrderByElement
-                genColumn
-                genTableName
-                genScalarType
-                genFunctionName
-                genXComputedField
-                genBooleanOperators
-                genA
-                fieldNameRange
-                nameRange
-                hashRange
-                enumRange
-                valueInfoRange
-                descriptionRange
-                relInfoMappingRange
-                scalarRange
-                castRange
-                castOpRange
-                funcArgPosRange
-                funcArgNameRange
-                funcArgNamedRange
-                relInfoMappingRange
-                opNameRange
-                andRange
-                orRange
-                columnRange
-                columnPositionRange
-            )
-
-      limit :: m (Maybe Int)
-      limit = maybe $ integral limitRange
-
-      offset :: m (Maybe Int64)
-      offset = maybe $ integral offsetRange
-
-      distinct :: m (Maybe (NonEmpty (Column b)))
-      distinct = maybe . nonEmpty distinctRange $ genColumn
-
-genFunctionArgsExpG ::
-  MonadGen m =>
-  m a ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  m (FunctionArgsExpG a)
-genFunctionArgsExpG genA positionalRange nameRange namedRange =
-  FunctionArgsExp
-    <$> list positionalRange genA
-    <*> genHashMap (genArbitraryUnicodeText nameRange) genA namedRange
-
-genArgumentExp :: MonadGen m => m a -> m (ArgumentExp a)
-genArgumentExp genA = choice [tableRow, session, input]
-  where
-    -- Don't actually generate this except manually, as it presumes
-    -- that the root table has a specific column.
-    --
-    -- responsePayload = pure AEActionResponsePayload
-    tableRow = pure AETableRow
-    session = AESession <$> genA
-    input = AEInput <$> genA
+      ]
 
 genGExists ::
-  MonadGen m =>
+  (MonadGen m) =>
   m a ->
   m (TableName b) ->
-  Range Int ->
-  Range Int ->
   m (GExists b a)
-genGExists aGen tableGen andRange orRange =
-  GExists <$> tableGen <*> genAnnBoolExp aGen tableGen andRange orRange
+genGExists aGen tableGen =
+  GExists <$> tableGen <*> genAnnBoolExp aGen tableGen
 
 genAnnBoolExp ::
-  MonadGen m =>
+  (MonadGen m) =>
   m a ->
   m (TableName b) ->
-  Range Int ->
-  Range Int ->
   m (GBoolExp b a)
 genAnnBoolExp
   aGen
-  tableGen
-  andRange
-  orRange =
+  tableGen =
     recursive
       choice
       [boolFld]
       [boolAnd, boolOr, boolNot, boolExists]
     where
-      boolAnd = BoolAnd <$> list andRange (genAnnBoolExp aGen tableGen andRange orRange)
-      boolOr = BoolOr <$> list orRange (genAnnBoolExp aGen tableGen andRange orRange)
-      boolNot = BoolNot <$> genAnnBoolExp aGen tableGen andRange orRange
-      boolExists = BoolExists <$> genGExists aGen tableGen andRange orRange
-      boolFld = BoolFld <$> aGen
+      boolAnd = BoolAnd <$> list defaultRange (genAnnBoolExp aGen tableGen)
+      boolOr = BoolOr <$> list defaultRange (genAnnBoolExp aGen tableGen)
+      boolNot = BoolNot <$> genAnnBoolExp aGen tableGen
+      boolExists = BoolExists <$> genGExists aGen tableGen
+      boolFld = BoolField <$> aGen
 
 genAnnBoolExpFld ::
-  MonadGen m =>
-  Eq (ScalarType b) =>
-  Eq (Column b) =>
-  Hashable (ScalarType b) =>
-  Hashable (Column b) =>
+  (MonadGen m) =>
+  (Hashable (ScalarType b)) =>
+  (Hashable (Column b)) =>
+  (Hashable (ColumnPath b)) =>
   m (Column b) ->
+  m (ColumnPath b) ->
   m (TableName b) ->
   m (ScalarType b) ->
   m (FunctionName b) ->
   m (XComputedField b) ->
   m (BooleanOperators b a) ->
+  m (FunctionArgumentExp b a) ->
   m a ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
   m (AnnBoolExpFld b a)
 genAnnBoolExpFld
   genColumn
+  genColumnPath
   genTableName
   genScalarType
   genFunctionName
   genXComputedField
   genBooleanOperators
-  genA
-  fieldNameRange
-  nameRange
-  hashRange
-  enumRange
-  valueInfoRange
-  descriptionRange
-  relInfoMappingRange
-  scalarRange
-  castRange
-  castOpRange
-  andRange
-  orRange
-  columnRange
-  columnPositionRange =
+  genFunctionArgumentExp
+  genA =
     choice [column, relationship, computedField]
     where
       column =
@@ -601,304 +162,220 @@ genAnnBoolExpFld
             genColumn
             genTableName
             genScalarType
-            nameRange
-            hashRange
-            enumRange
-            valueInfoRange
-            descriptionRange
-            columnPositionRange
+          <*> genAnnRedactionExp
+            genColumn
+            genColumnPath
+            genTableName
+            genScalarType
+            genFunctionName
+            genXComputedField
+            genBooleanOperators
+            genFunctionArgumentExp
+            genA
           <*> list
-            columnRange
+            defaultRange
             ( genOpExpG
                 genTableName
                 genColumn
                 genScalarType
                 genBooleanOperators
                 genA
-                castRange
-                castOpRange
             )
       relationship =
         AVRelationship
-          <$> genRelInfo genTableName genColumn nameRange relInfoMappingRange
-          <*> genAnnBoolExp
-            ( genAnnBoolExpFld
-                genColumn
-                genTableName
-                genScalarType
-                genFunctionName
-                genXComputedField
-                genBooleanOperators
-                genA
-                fieldNameRange
-                nameRange
-                hashRange
-                enumRange
-                valueInfoRange
-                descriptionRange
-                relInfoMappingRange
-                scalarRange
-                castRange
-                castOpRange
-                andRange
-                orRange
-                columnRange
-                columnPositionRange
-            )
-            genTableName
-            andRange
-            orRange
+          <$> genRelInfo genTableName genColumnPath
+          <*> ( RelationshipFilters
+                  <$> genAnnBoolExp
+                    ( genAnnBoolExpFld
+                        genColumn
+                        genColumnPath
+                        genTableName
+                        genScalarType
+                        genFunctionName
+                        genXComputedField
+                        genBooleanOperators
+                        genFunctionArgumentExp
+                        genA
+                    )
+                    genTableName
+                  <*> genAnnBoolExp
+                    ( genAnnBoolExpFld
+                        genColumn
+                        genColumnPath
+                        genTableName
+                        genScalarType
+                        genFunctionName
+                        genXComputedField
+                        genBooleanOperators
+                        genFunctionArgumentExp
+                        genA
+                    )
+                    genTableName
+              )
       computedField =
         AVComputedField
           <$> genAnnComputedFieldBolExp
             genTableName
             genColumn
+            genColumnPath
             genScalarType
             genBooleanOperators
             genXComputedField
             genFunctionName
+            genFunctionArgumentExp
             genA
-            fieldNameRange
-            nameRange
-            hashRange
-            enumRange
-            valueInfoRange
-            descriptionRange
-            relInfoMappingRange
-            scalarRange
-            castRange
-            castOpRange
-            andRange
-            orRange
-            columnRange
-            columnPositionRange
 
 genRelInfo ::
-  MonadGen m =>
-  Eq (Column b) =>
-  Hashable (Column b) =>
+  (MonadGen m) =>
+  (Hashable (ColumnPath b)) =>
   m (TableName b) ->
-  m (Column b) ->
-  Range Int ->
-  Range Int ->
+  m (ColumnPath b) ->
   m (RelInfo b)
-genRelInfo genTableName genColumn nameRange mappingRange =
+genRelInfo genTableName genColumn =
   RelInfo
-    <$> genRelName nameRange
+    <$> genRelName
     <*> genRelType
-    <*> genHashMap genColumn genColumn mappingRange
-    <*> genTableName
+    <*> (RelMapping <$> genHashMap genColumn genColumn defaultRange)
+    <*> genRelTarget genTableName
     <*> bool_
     <*> genInsertOrder
 
-genRelName :: MonadGen m => Range Int -> m RelName
-genRelName range = RelName <$> genNonEmptyText range
+genRelTarget :: (MonadGen m) => m (TableName b) -> m (RelTarget b)
+genRelTarget genTableName =
+  choice
+    [ RelTargetTable <$> genTableName,
+      RelTargetNativeQuery <$> genNativeQueryName
+    ]
 
-genRelType :: MonadGen m => m RelType
+genNativeQueryName :: (MonadGen m) => m NativeQueryName
+genNativeQueryName = NativeQueryName . G.unsafeMkName <$> Assoc.genIdentifier
+
+genRelName :: (MonadGen m) => m RelName
+genRelName = RelName <$> genNonEmptyText defaultRange
+
+genRelType :: (MonadGen m) => m RelType
 genRelType = element [ObjRel, ArrRel]
 
-genInsertOrder :: MonadGen m => m InsertOrder
+genInsertOrder :: (MonadGen m) => m InsertOrder
 genInsertOrder = element [BeforeParent, AfterParent]
 
-genIdentifier :: MonadGen m => Range Int -> m FIIdentifier
-genIdentifier range = FIIdentifier <$> genArbitraryUnicodeText range
-
 genAnnComputedFieldBolExp ::
-  MonadGen m =>
-  Eq (ScalarType b) =>
-  Eq (Column b) =>
-  Hashable (ScalarType b) =>
-  Hashable (Column b) =>
+  (MonadGen m) =>
+  (Hashable (ScalarType b)) =>
+  (Hashable (Column b)) =>
+  (Hashable (ColumnPath b)) =>
   m (TableName b) ->
   m (Column b) ->
+  m (ColumnPath b) ->
   m (ScalarType b) ->
   m (BooleanOperators b a) ->
   m (XComputedField b) ->
   m (FunctionName b) ->
+  m (FunctionArgumentExp b a) ->
   m a ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
   m (AnnComputedFieldBoolExp b a)
 genAnnComputedFieldBolExp
   genTableName
   genColumn
+  genColumnPath
   genScalarType
   genBooleanOperators
   genXComputedField
   genFunctionName
-  genA
-  fieldNameRange
-  nameRange
-  hashRange
-  enumRange
-  valueInfoRange
-  descriptionRange
-  relInfoMappingRange
-  scalarRange
-  castRange
-  castOpRange
-  andRange
-  orRange
-  columnRange
-  columnPositionRange =
+  genFunctionArgumentExp
+  genA =
     AnnComputedFieldBoolExp
       <$> genXComputedField
-      <*> genComputedFieldName fieldNameRange
+      <*> genComputedFieldName
       <*> genFunctionName
-      <*> genSessionArgumentPresence genA
+      <*> genFunctionArgsExpG genFunctionArgumentExp
       <*> genComputedFieldBoolExp
         genTableName
         genColumn
+        genColumnPath
         genScalarType
         genFunctionName
         genXComputedField
         genBooleanOperators
+        genFunctionArgumentExp
         genA
-        fieldNameRange
-        nameRange
-        hashRange
-        enumRange
-        valueInfoRange
-        descriptionRange
-        relInfoMappingRange
-        scalarRange
-        castRange
-        castOpRange
-        andRange
-        orRange
-        columnRange
-        columnPositionRange
 
 genComputedFieldBoolExp ::
-  MonadGen m =>
-  Eq (ScalarType b) =>
-  Eq (Column b) =>
-  Hashable (ScalarType b) =>
-  Hashable (Column b) =>
+  (MonadGen m) =>
+  (Hashable (ScalarType b)) =>
+  (Hashable (Column b)) =>
+  (Hashable (ColumnPath b)) =>
   m (TableName b) ->
   m (Column b) ->
+  m (ColumnPath b) ->
   m (ScalarType b) ->
   m (FunctionName b) ->
   m (XComputedField b) ->
   m (BooleanOperators b a) ->
+  m (FunctionArgumentExp b a) ->
   m a ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
   m (ComputedFieldBoolExp b a)
 genComputedFieldBoolExp
   genTableName
   genColumn
+  genColumnPath
   genScalarType
   genFunctionName
   genXComputedField
   genBooleanOperators
-  genA
-  fieldNameRange
-  nameRange
-  hashRange
-  enumRange
-  valueInfoRange
-  descriptionRange
-  relInfoMappingRange
-  scalarRange
-  castRange
-  castOpRange
-  andRange
-  orRange
-  columnRange
-  columnPositionRange =
+  genFunctionArgumentExp
+  genA =
     choice
       [ CFBEScalar
-          <$> list
-            scalarRange
+          <$> genAnnRedactionExp
+            genColumn
+            genColumnPath
+            genTableName
+            genScalarType
+            genFunctionName
+            genXComputedField
+            genBooleanOperators
+            genFunctionArgumentExp
+            genA
+          <*> list
+            defaultRange
             ( genOpExpG
                 genTableName
                 genColumn
                 genScalarType
                 genBooleanOperators
                 genA
-                castRange
-                castOpRange
             ),
         CFBETable
           <$> genTableName
           <*> genAnnBoolExp
             ( genAnnBoolExpFld
                 genColumn
+                genColumnPath
                 genTableName
                 genScalarType
                 genFunctionName
                 genXComputedField
                 genBooleanOperators
+                genFunctionArgumentExp
                 genA
-                fieldNameRange
-                nameRange
-                hashRange
-                enumRange
-                valueInfoRange
-                descriptionRange
-                relInfoMappingRange
-                scalarRange
-                castRange
-                castOpRange
-                andRange
-                orRange
-                columnRange
-                columnPositionRange
             )
             genTableName
-            andRange
-            orRange
       ]
 
-genComputedFieldName :: MonadGen m => Range Int -> m ComputedFieldName
-genComputedFieldName range = ComputedFieldName <$> genNonEmptyText range
-
-genSessionArgumentPresence :: MonadGen m => m a -> m (SessionArgumentPresence a)
-genSessionArgumentPresence genA =
-  choice
-    [ pure SAPNotPresent,
-      SAPFirst <$> genA,
-      SAPSecond <$> genA
-    ]
+genComputedFieldName :: (MonadGen m) => m ComputedFieldName
+genComputedFieldName = ComputedFieldName <$> genNonEmptyText defaultRange
 
 genOpExpG ::
-  MonadGen m =>
-  Eq (ScalarType b) =>
-  Hashable (ScalarType b) =>
+  (MonadGen m) =>
+  (Hashable (ScalarType b)) =>
   m (TableName b) ->
   m (Column b) ->
   m (ScalarType b) ->
   m (BooleanOperators b a) ->
   m a ->
-  Range Int ->
-  Range Int ->
   m (OpExpG b a)
-genOpExpG genTableName genColumn genScalarType genBooleanOperators genA castRange castOpRange =
+genOpExpG genTableName genColumn genScalarType genBooleanOperators genA =
   choice
     [ acast,
       aeq,
@@ -926,19 +403,17 @@ genOpExpG genTableName genColumn genScalarType genBooleanOperators genA castRang
       ACast
         <$> genHashMap
           genScalarType
-          ( list castOpRange $
-              genOpExpG
+          ( list defaultRange
+              $ genOpExpG
                 genTableName
                 genColumn
                 genScalarType
                 genBooleanOperators
                 genA
-                castRange
-                castOpRange
           )
-          castRange
-    aeq = AEQ <$> bool_ <*> genA
-    ane = ANE <$> bool_ <*> genA
+          defaultRange
+    aeq = AEQ <$> nullableComparison <*> genA
+    ane = ANE <$> nullableComparison <*> genA
     ain = AIN <$> genA
     anin = ANIN <$> genA
     agt = AGT <$> genA
@@ -957,81 +432,72 @@ genOpExpG genTableName genColumn genScalarType genBooleanOperators genA castRang
     anIsNotNull = pure ANISNOTNULL
     aBackendSpecific = ABackendSpecific <$> genBooleanOperators
 
+    nullableComparison =
+      bool_ <&> \case
+        True -> NonNullableComparison
+        False -> NullableComparison
+
     genRootOrCurrent = element [IsRoot, IsCurrent]
 
 genColumnType ::
-  MonadGen m =>
+  (MonadGen m) =>
   m (TableName b) ->
   m (ScalarType b) ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
   m (ColumnType b)
-genColumnType genTableName genScalarType hashRange enumRange valueInfoRange =
+genColumnType genTableName genScalarType =
   choice [columnScalar, columnEnumReference]
   where
     columnScalar = ColumnScalar <$> genScalarType
     columnEnumReference =
       ColumnEnumReference
-        <$> genEnumReference genTableName hashRange enumRange valueInfoRange
+        <$> genEnumReference genTableName
 
 genEnumReference ::
-  MonadGen m =>
+  (MonadGen m) =>
   m (TableName b) ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
   m (EnumReference b)
-genEnumReference genTableName hashRange enumRange valueInfoRange =
+genEnumReference genTableName =
   EnumReference
     <$> genTableName
     <*> genHashMap
-      (genEnumValue enumRange)
-      (genEnumValueInfo valueInfoRange)
-      hashRange
+      genEnumValue
+      genEnumValueInfo
+      defaultRange
+    <*> maybe
+      ( genGName
+          defaultRange
+      )
 
-genEnumValue :: MonadGen m => Range Int -> m EnumValue
-genEnumValue range = EnumValue <$> genGName range
+genEnumValue :: (MonadGen m) => m EnumValue
+genEnumValue = EnumValue <$> genGName defaultRange
 
-genEnumValueInfo :: MonadGen m => Range Int -> m EnumValueInfo
-genEnumValueInfo range = EnumValueInfo <$> maybe (genArbitraryUnicodeText range)
+genEnumValueInfo :: (MonadGen m) => m EnumValueInfo
+genEnumValueInfo = EnumValueInfo <$> maybe (genArbitraryUnicodeText defaultRange)
 
 genColumnInfo ::
-  MonadGen m =>
+  (MonadGen m) =>
   m (Column b) ->
   m (TableName b) ->
   m (ScalarType b) ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
   m (ColumnInfo b)
 genColumnInfo
   genColumn
   genTableName
-  genScalarType
-  nameRange
-  hashRange
-  enumRange
-  valueInfoRange
-  descriptionRange
-  columnPositionRange =
+  genScalarType =
     ColumnInfo
       <$> genColumn
-      <*> genGName nameRange
-      <*> integral columnPositionRange
-      <*> genColumnType genTableName genScalarType hashRange enumRange valueInfoRange
+      <*> genGName defaultRange
+      <*> integral defaultRange
+      <*> genColumnType genTableName genScalarType
       <*> bool_
-      <*> maybe (genDescription descriptionRange)
+      <*> maybe (genDescription defaultRange)
       <*> genColumnMutability
 
-genColumnMutability :: MonadGen m => m ColumnMutability
+genColumnMutability :: (MonadGen m) => m ColumnMutability
 genColumnMutability = ColumnMutability <$> bool <*> bool
 
 genAnnotatedOrderByItemG ::
-  MonadGen m =>
+  (MonadGen m) =>
   m (BasicOrderType b) ->
   m (NullsOrderType b) ->
   m a ->
@@ -1043,65 +509,30 @@ genAnnotatedOrderByItemG genBasicOrderType genNullsOrderType genA =
     <*> maybe genNullsOrderType
 
 genAnnotatedOrderByElement ::
-  MonadGen m =>
-  Eq (ScalarType b) =>
-  Eq (Column b) =>
-  Hashable (ScalarType b) =>
-  Hashable (Column b) =>
+  (MonadGen m) =>
+  (Hashable (ScalarType b)) =>
+  (Hashable (Column b)) =>
+  (Hashable (ColumnPath b)) =>
   m (Column b) ->
+  m (ColumnPath b) ->
   m (TableName b) ->
   m (ScalarType b) ->
   m (FunctionName b) ->
   m (XComputedField b) ->
   m (BooleanOperators b a) ->
+  m (FunctionArgumentExp b a) ->
   m a ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
   m (AnnotatedOrderByElement b a)
 genAnnotatedOrderByElement
   genColumn
+  genColumnPath
   genTableName
   genScalarType
   genFunctionName
   genXComputedField
   genBooleanOperators
-  genA
-  fieldNameRange
-  nameRange
-  hashRange
-  enumRange
-  valueInfoRange
-  descriptionRange
-  mappingRange
-  scalarRange
-  castRange
-  castOpRange
-  funcArgPosRange
-  funcArgNameRange
-  funcArgNamedRange
-  relInfoMappingRange
-  opNameRange
-  andRange
-  orRange
-  columnRange
-  columnPositionRange =
+  genFunctionArgumentExp
+  genA =
     choice
       [ column,
         objectRelation,
@@ -1115,362 +546,234 @@ genAnnotatedOrderByElement
             genColumn
             genTableName
             genScalarType
-            nameRange
-            hashRange
-            enumRange
-            valueInfoRange
-            descriptionRange
-            columnPositionRange
-      objectRelation =
-        AOCObjectRelation
-          <$> genRelInfo genTableName genColumn nameRange mappingRange
-          <*> genAnnBoolExp
-            ( genAnnBoolExpFld
-                genColumn
-                genTableName
-                genScalarType
-                genFunctionName
-                genXComputedField
-                genBooleanOperators
-                genA
-                fieldNameRange
-                nameRange
-                hashRange
-                enumRange
-                valueInfoRange
-                descriptionRange
-                mappingRange
-                scalarRange
-                castRange
-                castOpRange
-                andRange
-                orRange
-                columnRange
-                columnPositionRange
-            )
-            genTableName
-            andRange
-            orRange
-          <*> genAnnotatedOrderByElement
+          <*> genAnnRedactionExp
             genColumn
+            genColumnPath
             genTableName
             genScalarType
             genFunctionName
             genXComputedField
             genBooleanOperators
+            genFunctionArgumentExp
             genA
-            fieldNameRange
-            nameRange
-            hashRange
-            enumRange
-            valueInfoRange
-            descriptionRange
-            mappingRange
-            scalarRange
-            castRange
-            castOpRange
-            funcArgPosRange
-            funcArgNameRange
-            funcArgNamedRange
-            relInfoMappingRange
-            opNameRange
-            andRange
-            orRange
-            columnRange
-            columnPositionRange
-      arrayAggregation =
-        AOCArrayAggregation
-          <$> genRelInfo genTableName genColumn nameRange mappingRange
+      objectRelation =
+        AOCObjectRelation
+          <$> genRelInfo genTableName genColumnPath
           <*> genAnnBoolExp
             ( genAnnBoolExpFld
                 genColumn
+                genColumnPath
                 genTableName
                 genScalarType
                 genFunctionName
                 genXComputedField
                 genBooleanOperators
+                genFunctionArgumentExp
                 genA
-                fieldNameRange
-                nameRange
-                hashRange
-                enumRange
-                valueInfoRange
-                descriptionRange
-                mappingRange
-                scalarRange
-                castRange
-                castOpRange
-                andRange
-                orRange
-                columnRange
-                columnPositionRange
             )
             genTableName
-            andRange
-            orRange
-          <*> genAnnotatedAggregateOrderBy
+          <*> genAnnotatedOrderByElement
             genColumn
+            genColumnPath
             genTableName
             genScalarType
-            nameRange
-            nameRange
-            hashRange
-            enumRange
-            valueInfoRange
-            descriptionRange
-            columnPositionRange
+            genFunctionName
+            genXComputedField
+            genBooleanOperators
+            genFunctionArgumentExp
+            genA
+      arrayAggregation =
+        AOCArrayAggregation
+          <$> genRelInfo genTableName genColumnPath
+          <*> genAnnBoolExp
+            ( genAnnBoolExpFld
+                genColumn
+                genColumnPath
+                genTableName
+                genScalarType
+                genFunctionName
+                genXComputedField
+                genBooleanOperators
+                genFunctionArgumentExp
+                genA
+            )
+            genTableName
+          <*> genAnnotatedAggregateOrderBy
+            genColumn
+            genColumnPath
+            genTableName
+            genScalarType
+            genFunctionName
+            genXComputedField
+            genBooleanOperators
+            genFunctionArgumentExp
+            genA
       computedField =
         AOCComputedField
           <$> genComputedFieldOrderBy
             genColumn
+            genColumnPath
             genScalarType
             genTableName
             genFunctionName
             genXComputedField
             genBooleanOperators
+            genFunctionArgumentExp
             genA
-            fieldNameRange
-            funcArgPosRange
-            funcArgNameRange
-            funcArgNamedRange
-            nameRange
-            hashRange
-            enumRange
-            valueInfoRange
-            descriptionRange
-            relInfoMappingRange
-            scalarRange
-            castRange
-            castOpRange
-            opNameRange
-            andRange
-            orRange
-            columnRange
-            columnPositionRange
 
 genAnnotatedAggregateOrderBy ::
-  MonadGen m =>
+  (MonadGen m) =>
+  (Hashable (ScalarType b)) =>
+  (Hashable (Column b)) =>
+  (Hashable (ColumnPath b)) =>
   m (Column b) ->
+  m (ColumnPath b) ->
   m (TableName b) ->
   m (ScalarType b) ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  m (AnnotatedAggregateOrderBy b)
+  m (FunctionName b) ->
+  m (XComputedField b) ->
+  m (BooleanOperators b a) ->
+  m (FunctionArgumentExp b a) ->
+  m a ->
+  m (AnnotatedAggregateOrderBy b a)
 genAnnotatedAggregateOrderBy
   genColumn
+  genColumnPath
   genTableName
   genScalarType
-  opNameRange
-  nameRange
-  hashRange
-  enumRange
-  valueInfoRange
-  descriptionRange
-  columnPositionRange =
+  genFunctionName
+  genXComputedField
+  genBooleanOperators
+  genFunctionArgumentExp
+  genA =
     choice
       [ pure AAOCount,
         AAOOp
-          <$> genArbitraryUnicodeText opNameRange
-          <*> genColumnInfo
-            genColumn
-            genTableName
-            genScalarType
-            nameRange
-            hashRange
-            enumRange
-            valueInfoRange
-            descriptionRange
-            columnPositionRange
+          <$> ( AggregateOrderByColumn
+                  <$> genArbitraryUnicodeText defaultRange
+                  <*> genColumnType genTableName genScalarType
+                  <*> genColumnInfo
+                    genColumn
+                    genTableName
+                    genScalarType
+                  <*> genAnnRedactionExp
+                    genColumn
+                    genColumnPath
+                    genTableName
+                    genScalarType
+                    genFunctionName
+                    genXComputedField
+                    genBooleanOperators
+                    genFunctionArgumentExp
+                    genA
+              )
       ]
 
 genComputedFieldOrderBy ::
-  MonadGen m =>
-  Eq (ScalarType b) =>
-  Hashable (ScalarType b) =>
-  Eq (Column b) =>
-  Hashable (Column b) =>
+  (MonadGen m) =>
+  (Hashable (ScalarType b)) =>
+  (Hashable (Column b)) =>
+  (Hashable (ColumnPath b)) =>
   m (Column b) ->
+  m (ColumnPath b) ->
   m (ScalarType b) ->
   m (TableName b) ->
   m (FunctionName b) ->
   m (XComputedField b) ->
   m (BooleanOperators b a) ->
+  m (FunctionArgumentExp b a) ->
   m a ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
   m (ComputedFieldOrderBy b a)
 genComputedFieldOrderBy
   genColumn
+  genColumnPath
   genScalarType
   genTableName
   genFunctionName
   genXComputedField
   genBooleanOperators
-  genA
-  fieldNameRange
-  funcArgPosRange
-  funcArgNameRange
-  funcArgNamedRange
-  nameRange
-  hashRange
-  enumRange
-  valueInfoRange
-  descriptionRange
-  relInfoMappingRange
-  scalarRange
-  castRange
-  castOpRange
-  opNameRange
-  andRange
-  orRange
-  columnRange
-  columnPositionRange =
+  genFunctionArgumentExp
+  genA =
     ComputedFieldOrderBy
       <$> genXComputedField
-      <*> genComputedFieldName fieldNameRange
+      <*> genComputedFieldName
       <*> genFunctionName
-      <*> genFunctionArgsExpG
-        (genArgumentExp genA)
-        funcArgPosRange
-        funcArgNameRange
-        funcArgNamedRange
+      <*> genFunctionArgsExpG genFunctionArgumentExp
       <*> genComputedFieldOrderByElement
         genColumn
+        genColumnPath
         genScalarType
         genTableName
         genFunctionName
         genXComputedField
         genBooleanOperators
+        genFunctionArgumentExp
         genA
-        fieldNameRange
-        nameRange
-        hashRange
-        enumRange
-        valueInfoRange
-        descriptionRange
-        relInfoMappingRange
-        scalarRange
-        castRange
-        castOpRange
-        opNameRange
-        andRange
-        orRange
-        columnRange
-        columnPositionRange
 
 genComputedFieldOrderByElement ::
-  MonadGen m =>
-  Eq (ScalarType b) =>
-  Hashable (ScalarType b) =>
-  Eq (Column b) =>
-  Hashable (Column b) =>
+  (MonadGen m) =>
+  (Hashable (ScalarType b)) =>
+  (Hashable (Column b)) =>
+  (Hashable (ColumnPath b)) =>
   m (Column b) ->
+  m (ColumnPath b) ->
   m (ScalarType b) ->
   m (TableName b) ->
   m (FunctionName b) ->
   m (XComputedField b) ->
   m (BooleanOperators b a) ->
+  m (FunctionArgumentExp b a) ->
   m a ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
-  Range Int ->
   m (ComputedFieldOrderByElement b a)
 genComputedFieldOrderByElement
   genColumn
+  genColumnPath
   genScalarType
   genTableName
   genFunctionName
   genXComputedField
   genBooleanOperators
-  genA
-  fieldNameRange
-  nameRange
-  hashRange
-  enumRange
-  valueInfoRange
-  descriptionRange
-  relInfoMappingRange
-  scalarRange
-  castRange
-  castOpRange
-  opNameRange
-  andRange
-  orRange
-  columnRange
-  columnPositionRange =
+  genFunctionArgumentExp
+  genA =
     choice
-      [ CFOBEScalar <$> genScalarType,
+      [ CFOBEScalar
+          <$> genScalarType
+          <*> genAnnRedactionExp
+            genColumn
+            genColumnPath
+            genTableName
+            genScalarType
+            genFunctionName
+            genXComputedField
+            genBooleanOperators
+            genFunctionArgumentExp
+            genA,
         CFOBETableAggregation
           <$> genTableName
           <*> genAnnBoolExp
             ( genAnnBoolExpFld
                 genColumn
+                genColumnPath
                 genTableName
                 genScalarType
                 genFunctionName
                 genXComputedField
                 genBooleanOperators
+                genFunctionArgumentExp
                 genA
-                fieldNameRange
-                nameRange
-                hashRange
-                enumRange
-                valueInfoRange
-                descriptionRange
-                relInfoMappingRange
-                scalarRange
-                castRange
-                castOpRange
-                andRange
-                orRange
-                columnRange
-                columnPositionRange
             )
             genTableName
-            andRange
-            orRange
           <*> genAnnotatedAggregateOrderBy
             genColumn
+            genColumnPath
             genTableName
             genScalarType
-            opNameRange
-            nameRange
-            hashRange
-            enumRange
-            valueInfoRange
-            descriptionRange
-            columnPositionRange
+            genFunctionName
+            genXComputedField
+            genBooleanOperators
+            genFunctionArgumentExp
+            genA
       ]
+
+genIdentifier :: (MonadGen m) => m FIIdentifier
+genIdentifier = Hasura.RQL.IR.Select.FIIdentifier <$> genArbitraryUnicodeText defaultRange

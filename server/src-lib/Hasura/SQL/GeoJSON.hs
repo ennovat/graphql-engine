@@ -16,10 +16,11 @@ where
 import Control.Monad
 import Data.Aeson qualified as J
 import Data.Aeson.Casing qualified as J
-import Data.Aeson.TH qualified as J
 import Data.Aeson.Types qualified as J
 import Data.Vector qualified as V
 import Hasura.Prelude
+
+-- Positions
 
 data Position
   = Position !Double !Double !(Maybe Double)
@@ -40,8 +41,8 @@ instance J.FromJSON Position where
       then fail "A Position needs at least 2 elements"
       else -- here we are ignoring anything past 3 elements
 
-        return $
-          Position
+        return
+          $ Position
             (arr `V.unsafeIndex` 0)
             (arr `V.unsafeIndex` 1)
             (arr V.!? 2)
@@ -50,11 +51,15 @@ instance J.ToJSON Position where
   toJSON (Position a b c) =
     J.toJSON $ a : b : maybeToList c
 
+-- Point, Multipoint
+
 newtype Point = Point {unPoint :: Position}
   deriving (Show, Eq, J.ToJSON, J.FromJSON)
 
 newtype MultiPoint = MultiPoint {unMultiPoint :: [Position]}
   deriving (Show, Eq, J.ToJSON, J.FromJSON)
+
+-- LineString, MultiLineString
 
 data LineString = LineString
   { _lsFirst :: !Position,
@@ -81,8 +86,7 @@ instance J.FromJSON LineString where
 newtype MultiLineString = MultiLineString {unMultiLineString :: [LineString]}
   deriving (Show, Eq, J.ToJSON, J.FromJSON)
 
-newtype GeometryCollection = GeometryCollection {unGeometryCollection :: [GeometryWithCRS]}
-  deriving (Show, Eq, J.ToJSON, J.FromJSON)
+-- Polygon, MultiPolygon
 
 data LinearRing = LinearRing
   { _pFirst :: !Position,
@@ -103,8 +107,8 @@ instance J.FromJSON LinearRing where
             thrPos = arr `V.unsafeIndex` 2
             rest = V.drop 3 arr
         let lastPos = V.last rest
-        unless (fstPos == lastPos) $
-          fail "the first and last locations have to be equal for a LinearRing"
+        unless (fstPos == lastPos)
+          $ fail "the first and last locations have to be equal for a LinearRing"
         return $ LinearRing fstPos sndPos thrPos $ V.toList $ V.init rest
 
 instance J.ToJSON LinearRing where
@@ -117,15 +121,59 @@ newtype Polygon = Polygon {unPolygon :: [LinearRing]}
 newtype MultiPolygon = MultiPolygon {unMultiPolygon :: [Polygon]}
   deriving (Show, Eq, J.ToJSON, J.FromJSON)
 
-data Geometry
-  = GPoint !Point
-  | GMultiPoint !MultiPoint
-  | GLineString !LineString
-  | GMultiLineString !MultiLineString
-  | GPolygon !Polygon
-  | GMultiPolygon !MultiPolygon
-  | GGeometryCollection !GeometryCollection
-  deriving (Show, Eq)
+-- GeometryCollection
+
+data CRSNameProps = CRSNameProps
+  { _cnpName :: !Text
+  }
+  deriving (Show, Eq, Generic)
+
+data CRSLinkProps = CRSLinkProps
+  { _clpHref :: !Text,
+    _clpType :: !(Maybe Text)
+  }
+  deriving (Show, Eq, Generic)
+
+data CRS
+  = CRSName !CRSNameProps
+  | CRSLink !CRSLinkProps
+  deriving (Show, Eq, Generic)
+
+instance J.FromJSON CRSNameProps where
+  parseJSON = J.genericParseJSON (J.aesonPrefix J.camelCase)
+
+instance J.ToJSON CRSNameProps where
+  toJSON = J.genericToJSON (J.aesonPrefix J.camelCase)
+  toEncoding = J.genericToEncoding (J.aesonPrefix J.camelCase)
+
+instance J.FromJSON CRSLinkProps where
+  parseJSON = J.genericParseJSON (J.aesonPrefix J.camelCase)
+
+instance J.ToJSON CRSLinkProps where
+  toJSON = J.genericToJSON (J.aesonPrefix J.camelCase)
+  toEncoding = J.genericToEncoding (J.aesonPrefix J.camelCase)
+
+instance J.FromJSON CRS where
+  parseJSON =
+    J.genericParseJSON
+      J.defaultOptions
+        { J.constructorTagModifier = J.camelCase . drop 3,
+          J.sumEncoding = J.TaggedObject "type" "properties"
+        }
+
+instance J.ToJSON CRS where
+  toJSON =
+    J.genericToJSON
+      J.defaultOptions
+        { J.constructorTagModifier = J.camelCase . drop 3,
+          J.sumEncoding = J.TaggedObject "type" "properties"
+        }
+  toEncoding =
+    J.genericToEncoding
+      J.defaultOptions
+        { J.constructorTagModifier = J.camelCase . drop 3,
+          J.sumEncoding = J.TaggedObject "type" "properties"
+        }
 
 data GeometryWithCRS = GeometryWithCRS
   { _gwcGeom :: !Geometry,
@@ -168,28 +216,17 @@ instance J.FromJSON GeometryWithCRS where
     crsM <- o J..:? "crs"
     return $ GeometryWithCRS geom crsM
 
-data CRSNameProps = CRSNameProps
-  { _cnpName :: !Text
-  }
-  deriving (Show, Eq)
+newtype GeometryCollection = GeometryCollection {unGeometryCollection :: [GeometryWithCRS]}
+  deriving (Show, Eq, J.ToJSON, J.FromJSON)
 
-data CRSLinkProps = CRSLinkProps
-  { _clpHref :: !Text,
-    _clpType :: !(Maybe Text)
-  }
-  deriving (Show, Eq)
+-- Geometry
 
-data CRS
-  = CRSName !CRSNameProps
-  | CRSLink !CRSLinkProps
+data Geometry
+  = GPoint !Point
+  | GMultiPoint !MultiPoint
+  | GLineString !LineString
+  | GMultiLineString !MultiLineString
+  | GPolygon !Polygon
+  | GMultiPolygon !MultiPolygon
+  | GGeometryCollection !GeometryCollection
   deriving (Show, Eq)
-
-$(J.deriveJSON (J.aesonPrefix J.camelCase) ''CRSNameProps)
-$(J.deriveJSON (J.aesonPrefix J.camelCase) ''CRSLinkProps)
-$( J.deriveJSON
-     J.defaultOptions
-       { J.constructorTagModifier = J.camelCase . drop 3,
-         J.sumEncoding = J.TaggedObject "type" "properties"
-       }
-     ''CRS
- )

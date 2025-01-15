@@ -1,17 +1,24 @@
 - server
 + project
-@@ -13,4 +13,16 @@
--  tables: []
-+  tables:
-+  - table:
-+      name: t3
-+      schema: pub
-+  - table:
-+      name: t4
-+      schema: pub
-+  - table:
-+      name: t1
-+      schema: public
-+  - table:
-+      name: t2
-+      schema: public
+@@ -13,15 +13,20 @@
+-    tables: []
++    tables:
++      - table:
++          name: t3
++          schema: pub
++      - table:
++          name: t4
++          schema: pub
++      - table:
++          name: t1
++          schema: public
++      - table:
++          name: t2
++          schema: public
+-network: {}
+-api_limits: {}
+-inherited_roles: []
+-opentelemetry: {}
+-backend_configs: {}
+-graphql_schema_introspection:
+-  disabled_for_roles: []

@@ -2,8 +2,7 @@
 
 module Hasura.GraphQL.Execute.Remote
   ( buildExecStepRemote,
-    collectVariablesFromSelectionSet,
-    collectVariables,
+    getVariableDefinitionAndValue,
     resolveRemoteVariable,
     resolveRemoteField,
     runVariableCache,
@@ -11,22 +10,27 @@ module Hasura.GraphQL.Execute.Remote
 where
 
 import Data.Aeson qualified as J
-import Data.HashMap.Strict qualified as Map
+import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as Set
 import Data.Text qualified as T
 import Data.Text.Extended
+import Hasura.Authentication.Session (getSessionVariableValue, sessionVariableToGraphQLName)
+import Hasura.Authentication.User (UserInfo (..))
 import Hasura.Base.Error
 import Hasura.GraphQL.Execute.Backend
+import Hasura.GraphQL.Execute.RemoteJoin.Types (RemoteJoins)
 import Hasura.GraphQL.Parser
 import Hasura.GraphQL.Transport.HTTP.Protocol
 import Hasura.GraphQL.Transport.HTTP.Protocol qualified as GH
 import Hasura.Prelude
-import Hasura.RQL.Types
-import Hasura.Session
+import Hasura.RQL.IR.RemoteSchema qualified as IR
+import Hasura.RQL.Types.Relationships.Remote
+import Hasura.RQL.Types.ResultCustomization
+import Hasura.RemoteSchema.SchemaCache
 import Language.GraphQL.Draft.Syntax qualified as G
 
-mkVariableDefinitionAndValue :: Variable -> (G.VariableDefinition, (G.Name, J.Value))
-mkVariableDefinitionAndValue var@(Variable varInfo gType varValue) =
+getVariableDefinitionAndValue :: Variable -> (G.VariableDefinition, (G.Name, J.Value))
+getVariableDefinitionAndValue var@(Variable varInfo gType varValue) =
   (varDefn, (varName, varJSONValue))
   where
     varName = getName var
@@ -36,16 +40,18 @@ mkVariableDefinitionAndValue var@(Variable varInfo gType varValue) =
     defaultVal =
       case varInfo of
         VIRequired _ -> Nothing
-        VIOptional _ val -> Just val
+        VIOptional _ val -> val
 
     varJSONValue =
       case varValue of
-        JSONValue v -> v
-        GraphQLValue val -> graphQLValueToJSON val
+        Just (JSONValue v) -> v
+        Just (GraphQLValue val) -> graphQLValueToJSON val
+        -- TODO: is this semantically correct RE: GraphQL spec June 2018, section 2.9.5?
+        Nothing -> J.Null
 
 unresolveVariables ::
   forall fragments.
-  Functor fragments =>
+  (Functor fragments) =>
   G.SelectionSet fragments Variable ->
   G.SelectionSet fragments G.Name
 unresolveVariables =
@@ -53,33 +59,31 @@ unresolveVariables =
 
 collectVariables ::
   forall fragments var.
-  (Foldable fragments, Hashable var, Eq var) =>
+  (Foldable fragments, Hashable var) =>
   G.SelectionSet fragments var ->
   Set.HashSet var
 collectVariables =
   Set.unions . fmap (foldMap Set.singleton)
 
-collectVariablesFromSelectionSet ::
-  G.SelectionSet G.NoFragments Variable ->
-  [(G.VariableDefinition, (G.Name, J.Value))]
-collectVariablesFromSelectionSet =
-  map mkVariableDefinitionAndValue . Set.toList . collectVariables
-
 buildExecStepRemote ::
   RemoteSchemaInfo ->
   ResultCustomizer ->
   G.OperationType ->
-  G.SelectionSet G.NoFragments Variable ->
+  IR.GraphQLField Void Variable ->
+  Maybe RemoteJoins ->
+  Maybe OperationName ->
   ExecutionStep
-buildExecStepRemote remoteSchemaInfo resultCustomizer tp selSet =
-  let unresolvedSelSet = unresolveVariables selSet
-      allVars = map mkVariableDefinitionAndValue $ Set.toList $ collectVariables selSet
-      varValues = Map.fromList $ map snd allVars
-      varValsM = bool (Just varValues) Nothing $ Map.null varValues
+buildExecStepRemote remoteSchemaInfo resultCustomizer tp rootField remoteJoins operationName =
+  let selSet = [G.SelectionField $ IR.convertGraphQLField rootField]
+      unresolvedSelSet = unresolveVariables selSet
+      allVars = map getVariableDefinitionAndValue $ Set.toList $ collectVariables selSet
+      varValues = HashMap.fromList $ map snd allVars
+      varValsM = bool (Just varValues) Nothing $ HashMap.null varValues
       varDefs = map fst allVars
-      _grQuery = G.TypedOperationDefinition tp Nothing varDefs [] unresolvedSelSet
+      _grQuery = G.TypedOperationDefinition tp (_unOperationName <$> operationName) varDefs [] unresolvedSelSet
       _grVariables = varValsM
-   in ExecStepRemote remoteSchemaInfo resultCustomizer GH.GQLReq {_grOperationName = Nothing, ..}
+      _grOperationName = operationName
+   in ExecStepRemote remoteSchemaInfo resultCustomizer GH.GQLReq {..} remoteJoins
 
 -- | Association between keys uniquely identifying some remote JSON variable and
 -- an 'Int' identifier that will be used to construct a valid variable name to
@@ -156,9 +160,13 @@ resolveRemoteVariable ::
 resolveRemoteVariable userInfo = \case
   SessionPresetVariable sessionVar typeName presetInfo -> do
     sessionVarVal <-
-      onNothing (getSessionVariableValue sessionVar $ _uiSession userInfo) $
-        throw400 NotFound $ sessionVar <<> " session variable expected, but not found"
-    let varName = sessionVariableToGraphQLName sessionVar
+      onNothing (getSessionVariableValue sessionVar $ _uiSession userInfo)
+        $ throw400 NotFound
+        $ sessionVar
+        <<> " session variable expected, but not found"
+    varName <-
+      sessionVariableToGraphQLName sessionVar
+        `onNothing` throw500 (sessionVar <<> " cannot be made into a valid GraphQL name")
     coercedValue <-
       case presetInfo of
         SessionArgumentPresetScalar ->
@@ -169,9 +177,9 @@ resolveRemoteVariable userInfo = \case
                 Just i -> pure $ G.VInt i
             "Boolean" ->
               if
-                  | sessionVarVal `elem` ["true", "false"] ->
+                | sessionVarVal `elem` ["true", "false"] ->
                     pure $ G.VBoolean $ "true" == sessionVarVal
-                  | otherwise ->
+                | otherwise ->
                     throw400 CoercionError $ sessionVarVal <<> " cannot be coerced into a Boolean value"
             "Float" ->
               case readMaybe $ T.unpack sessionVarVal of
@@ -197,30 +205,34 @@ resolveRemoteVariable userInfo = \case
             False -> throw400 CoercionError $ sessionVarEnumVal <<> " is not one of the valid enum values"
     -- nullability is false, because we treat presets as hard presets
     let variableGType = G.TypeNamed (G.Nullability False) typeName
-    pure $ Variable (VIRequired varName) variableGType (GraphQLValue coercedValue)
+    pure $ Variable (VIRequired varName) variableGType $ Just $ GraphQLValue coercedValue
   RemoteJSONValue gtype jsonValue -> do
     let key = RemoteJSONVariableKey gtype jsonValue
     varMap <- gets coerce
     index <-
-      Map.lookup key varMap `onNothing` do
-        let i = Map.size varMap + 1
-        put . coerce $ Map.insert key i varMap
+      HashMap.lookup key varMap `onNothing` do
+        let i = HashMap.size varMap + 1
+        put . coerce $ HashMap.insert key i varMap
         pure i
-    let varName = G.unsafeMkName $ "hasura_json_var_" <> tshow index
-    pure $ Variable (VIRequired varName) gtype $ JSONValue jsonValue
+    -- This should never fail.
+    let varText = "hasura_json_var_" <> tshow index
+    varName <-
+      G.mkName varText
+        `onNothing` throw500 ("'" <> varText <> "' is not a valid GraphQL name")
+    pure $ Variable (VIRequired varName) gtype $ Just $ JSONValue jsonValue
   QueryVariable variable -> pure variable
 
 -- | TODO: Documentation.
 resolveRemoteField ::
   (MonadError QErr m) =>
   UserInfo ->
-  RemoteFieldG RemoteSchemaVariable ->
-  StateT RemoteJSONVariableMap m (RemoteFieldG Variable)
+  IR.RemoteSchemaRootField r RemoteSchemaVariable ->
+  StateT RemoteJSONVariableMap m (IR.RemoteSchemaRootField r Variable)
 resolveRemoteField userInfo = traverse (resolveRemoteVariable userInfo)
 
 -- | TODO: Documentation.
 runVariableCache ::
-  Monad m =>
+  (Monad m) =>
   StateT RemoteJSONVariableMap m a ->
   m a
 runVariableCache = flip evalStateT mempty

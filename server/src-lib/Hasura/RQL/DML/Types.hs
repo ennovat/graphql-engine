@@ -24,18 +24,17 @@ where
 
 import Data.Aeson
 import Data.Aeson.Casing
-import Data.Aeson.TH
 import Data.Attoparsec.Text qualified as AT
-import Data.HashMap.Strict qualified as M
+import Data.HashMap.Strict qualified as HashMap
 import Hasura.Backends.Postgres.Instances.Types ()
-import Hasura.Backends.Postgres.SQL.DML qualified as PG
+import Hasura.Backends.Postgres.SQL.DML qualified as Postgres
 import Hasura.Backends.Postgres.SQL.Types
 import Hasura.Prelude
 import Hasura.RQL.IR.BoolExp
 import Hasura.RQL.IR.OrderBy
+import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Column
 import Hasura.RQL.Types.Common
-import Hasura.SQL.Backend
 
 newtype OrderByExp = OrderByExp {getOrderByItems :: [OrderByItem ('Postgres 'Vanilla)]}
   deriving (Show, Eq)
@@ -56,9 +55,12 @@ instance FromJSON OrderByExp where
           `onLeft` const (fail "string format for 'order_by' entry : {+/-}column Eg : +posted")
       parseObject o =
         OrderByItemG
-          <$> o .:? "type"
-          <*> o .: "column"
-          <*> o .:? "nulls"
+          <$> o
+          .:? "type"
+          <*> o
+          .: "column"
+          <*> o
+          .:? "nulls"
       orderByParser =
         OrderByItemG
           <$> orderTypeParser
@@ -66,40 +68,44 @@ instance FromJSON OrderByExp where
           <*> pure Nothing
       orderTypeParser =
         choice
-          [ "+" *> pure (Just PG.OTAsc),
-            "-" *> pure (Just PG.OTDesc),
+          [ "+" *> pure (Just Postgres.OTAsc),
+            "-" *> pure (Just Postgres.OTDesc),
             pure Nothing
           ]
       orderColumnParser = AT.takeText >>= orderByColFromTxt
 
 data DMLQuery a
-  = DMLQuery !SourceName !QualifiedTable a
+  = DMLQuery SourceName QualifiedTable a
   deriving (Show, Eq)
 
 instance (FromJSON a) => FromJSON (DMLQuery a) where
   parseJSON = withObject "query" \o ->
     DMLQuery
-      <$> o .:? "source" .!= defaultSource
-      <*> o .: "table"
+      <$> o
+      .:? "source"
+      .!= defaultSource
+      <*> o
+      .: "table"
       <*> parseJSON (Object o)
 
 getSourceDMLQuery :: forall a. DMLQuery a -> SourceName
 getSourceDMLQuery (DMLQuery source _ _) = source
 
 data SelectG a b c = SelectG
-  { sqColumns :: ![a], -- Postgres columns and relationships
-    sqWhere :: !(Maybe b), -- Filter
-    sqOrderBy :: !(Maybe OrderByExp), -- Ordering
-    sqLimit :: !(Maybe c), -- Limit
-    sqOffset :: !(Maybe c) -- Offset
+  { sqColumns :: [a], -- Postgres columns and relationships
+    sqWhere :: Maybe b, -- Filter
+    sqOrderBy :: Maybe OrderByExp, -- Ordering
+    sqLimit :: Maybe c, -- Limit
+    sqOffset :: Maybe c -- Offset
   }
-  deriving (Show, Eq)
+  deriving (Show, Generic, Eq)
 
-$(deriveFromJSON hasuraJSON {omitNothingFields = True} ''SelectG)
+instance (FromJSON a, FromJSON b, FromJSON c) => FromJSON (SelectG a b c) where
+  parseJSON = genericParseJSON hasuraJSON {omitNothingFields = True}
 
 data Wildcard
   = Star
-  | StarDot !Wildcard
+  | StarDot Wildcard
   deriving (Show, Eq, Ord)
 
 parseWildcard :: AT.Parser Wildcard
@@ -111,9 +117,9 @@ parseWildcard =
 
 -- Columns in RQL
 data SelCol
-  = SCStar !Wildcard
-  | SCExtSimple !PGCol
-  | SCExtRel !RelName !(Maybe RelName) !SelectQ
+  = SCStar Wildcard
+  | SCExtSimple PGCol
+  | SCExtRel RelName (Maybe RelName) SelectQ
   deriving (Show, Eq)
 
 instance FromJSON SelCol where
@@ -123,12 +129,14 @@ instance FromJSON SelCol where
       Right x -> return $ SCStar x
   parseJSON v@(Object o) =
     SCExtRel
-      <$> o .: "name"
-      <*> o .:? "alias"
+      <$> o
+      .: "name"
+      <*> o
+      .:? "alias"
       <*> parseJSON v
   parseJSON _ =
-    fail $
-      mconcat
+    fail
+      $ mconcat
         [ "A column should either be a string or an ",
           "object (relationship)"
         ]
@@ -166,103 +174,127 @@ instance FromJSON ConstraintOn where
       "Expecting String or Array"
 
 data OnConflict = OnConflict
-  { ocConstraintOn :: !(Maybe ConstraintOn),
-    ocConstraint :: !(Maybe ConstraintName),
-    ocAction :: !ConflictAction
+  { ocConstraintOn :: Maybe ConstraintOn,
+    ocConstraint :: Maybe ConstraintName,
+    ocAction :: ConflictAction
   }
-  deriving (Show, Eq)
+  deriving (Show, Generic, Eq)
 
-$(deriveFromJSON hasuraJSON {omitNothingFields = True} ''OnConflict)
+instance FromJSON OnConflict where
+  parseJSON = genericParseJSON hasuraJSON {omitNothingFields = True}
 
 data InsertQuery = InsertQuery
-  { iqTable :: !QualifiedTable,
-    iqSource :: !SourceName,
-    iqObjects :: !Value,
-    iqOnConflict :: !(Maybe OnConflict),
-    iqReturning :: !(Maybe [PGCol])
+  { iqTable :: QualifiedTable,
+    iqSource :: SourceName,
+    iqObjects :: Value,
+    iqOnConflict :: Maybe OnConflict,
+    iqReturning :: Maybe [PGCol]
   }
   deriving (Show, Eq)
 
 instance FromJSON InsertQuery where
   parseJSON = withObject "insert query" $ \o ->
     InsertQuery
-      <$> o .: "table"
-      <*> o .:? "source" .!= defaultSource
-      <*> o .: "objects"
-      <*> o .:? "on_conflict"
-      <*> o .:? "returning"
+      <$> o
+      .: "table"
+      <*> o
+      .:? "source"
+      .!= defaultSource
+      <*> o
+      .: "objects"
+      <*> o
+      .:? "on_conflict"
+      <*> o
+      .:? "returning"
 
 type UpdVals b = ColumnValues b Value
 
 data UpdateQuery = UpdateQuery
-  { uqTable :: !QualifiedTable,
-    uqSource :: !SourceName,
-    uqWhere :: !(BoolExp ('Postgres 'Vanilla)),
-    uqSet :: !(UpdVals ('Postgres 'Vanilla)),
-    uqInc :: !(UpdVals ('Postgres 'Vanilla)),
-    uqMul :: !(UpdVals ('Postgres 'Vanilla)),
-    uqDefault :: ![PGCol],
-    uqReturning :: !(Maybe [PGCol])
+  { uqTable :: QualifiedTable,
+    uqSource :: SourceName,
+    uqWhere :: BoolExp ('Postgres 'Vanilla),
+    uqSet :: UpdVals ('Postgres 'Vanilla),
+    uqInc :: UpdVals ('Postgres 'Vanilla),
+    uqMul :: UpdVals ('Postgres 'Vanilla),
+    uqDefault :: [PGCol],
+    uqReturning :: Maybe [PGCol]
   }
   deriving (Show, Eq)
 
 instance FromJSON UpdateQuery where
   parseJSON = withObject "update query" \o ->
     UpdateQuery
-      <$> o .: "table"
-      <*> o .:? "source" .!= defaultSource
-      <*> o .: "where"
-      <*> ((o .: "$set" <|> o .:? "values") .!= M.empty)
-      <*> (o .:? "$inc" .!= M.empty)
-      <*> (o .:? "$mul" .!= M.empty)
-      <*> o .:? "$default" .!= []
-      <*> o .:? "returning"
+      <$> o
+      .: "table"
+      <*> o
+      .:? "source"
+      .!= defaultSource
+      <*> o
+      .: "where"
+      <*> ((o .: "$set" <|> o .:? "values") .!= HashMap.empty)
+      <*> (o .:? "$inc" .!= HashMap.empty)
+      <*> (o .:? "$mul" .!= HashMap.empty)
+      <*> o
+      .:? "$default"
+      .!= []
+      <*> o
+      .:? "returning"
 
 data DeleteQuery = DeleteQuery
-  { doTable :: !QualifiedTable,
-    doSource :: !SourceName,
-    doWhere :: !(BoolExp ('Postgres 'Vanilla)), -- where clause
-    doReturning :: !(Maybe [PGCol]) -- columns returning
+  { doTable :: QualifiedTable,
+    doSource :: SourceName,
+    doWhere :: BoolExp ('Postgres 'Vanilla), -- where clause
+    doReturning :: Maybe [PGCol] -- columns returning
   }
   deriving (Show, Eq)
 
 instance FromJSON DeleteQuery where
   parseJSON = withObject "delete query" $ \o ->
     DeleteQuery
-      <$> o .: "table"
-      <*> o .:? "source" .!= defaultSource
-      <*> o .: "where"
-      <*> o .:? "returning"
+      <$> o
+      .: "table"
+      <*> o
+      .:? "source"
+      .!= defaultSource
+      <*> o
+      .: "where"
+      <*> o
+      .:? "returning"
 
 data CountQuery = CountQuery
-  { cqTable :: !QualifiedTable,
-    cqSource :: !SourceName,
-    cqDistinct :: !(Maybe [PGCol]),
-    cqWhere :: !(Maybe (BoolExp ('Postgres 'Vanilla)))
+  { cqTable :: QualifiedTable,
+    cqSource :: SourceName,
+    cqDistinct :: Maybe [PGCol],
+    cqWhere :: Maybe (BoolExp ('Postgres 'Vanilla))
   }
   deriving (Show, Eq)
 
 instance FromJSON CountQuery where
   parseJSON = withObject "count query" $ \o ->
     CountQuery
-      <$> o .: "table"
-      <*> o .:? "source" .!= defaultSource
-      <*> o .:? "distinct"
-      <*> o .:? "where"
+      <$> o
+      .: "table"
+      <*> o
+      .:? "source"
+      .!= defaultSource
+      <*> o
+      .:? "distinct"
+      <*> o
+      .:? "where"
 
 data QueryT
-  = QTInsert !InsertQuery
-  | QTSelect !SelectQueryT
-  | QTUpdate !UpdateQuery
-  | QTDelete !DeleteQuery
-  | QTCount !CountQuery
-  | QTBulk ![QueryT]
-  deriving (Show, Eq)
+  = QTInsert InsertQuery
+  | QTSelect SelectQueryT
+  | QTUpdate UpdateQuery
+  | QTDelete DeleteQuery
+  | QTCount CountQuery
+  | QTBulk [QueryT]
+  deriving (Show, Generic, Eq)
 
-$( deriveFromJSON
-     defaultOptions
-       { constructorTagModifier = snakeCase . drop 2,
-         sumEncoding = TaggedObject "type" "args"
-       }
-     ''QueryT
- )
+instance FromJSON QueryT where
+  parseJSON =
+    genericParseJSON
+      defaultOptions
+        { constructorTagModifier = snakeCase . drop 2,
+          sumEncoding = TaggedObject "type" "args"
+        }

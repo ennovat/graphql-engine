@@ -16,7 +16,6 @@ where
 import Control.Applicative (optional)
 import Data.Aeson ((.:))
 import Data.Aeson qualified as J
-import Data.Aeson.TH qualified as J
 import Data.Attoparsec.Text qualified as AT
 import Data.Char qualified as C
 import Data.HashSet qualified as Set
@@ -31,15 +30,25 @@ data DomainParts = DomainParts
   }
   deriving (Show, Eq, Generic, Hashable)
 
-$(J.deriveJSON hasuraJSON ''DomainParts)
+instance J.FromJSON DomainParts where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON DomainParts where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 data Domains = Domains
   { dmFqdns :: !(Set.HashSet Text),
     dmWildcards :: !(Set.HashSet DomainParts)
   }
-  deriving (Show, Eq)
+  deriving (Show, Eq, Generic)
 
-$(J.deriveJSON hasuraJSON ''Domains)
+instance J.FromJSON Domains where
+  parseJSON = J.genericParseJSON hasuraJSON
+
+instance J.ToJSON Domains where
+  toJSON = J.genericToJSON hasuraJSON
+  toEncoding = J.genericToEncoding hasuraJSON
 
 data CorsConfig
   = CCAllowAll
@@ -70,7 +79,8 @@ instance J.FromJSON CorsConfig where
       False ->
         o .: "allowed_origins" >>= \v ->
           J.withText "origins" parseAllowAll v
-            <|> CCAllowedOrigins <$> J.parseJSON v
+            <|> CCAllowedOrigins
+            <$> J.parseJSON v
 
 isCorsDisabled :: CorsConfig -> Bool
 isCorsDisabled = \case
@@ -81,10 +91,10 @@ readCorsDomains :: String -> Either String CorsConfig
 readCorsDomains str
   | str == "*" = pure CCAllowAll
   | otherwise = do
-    let domains = map T.strip $ T.splitOn "," (T.pack str)
-    pDomains <- mapM parseOptWildcardDomain domains
-    let (fqdns, wcs) = (lefts pDomains, rights pDomains)
-    return $ CCAllowedOrigins $ Domains (Set.fromList fqdns) (Set.fromList wcs)
+      let domains = map T.strip $ T.splitOn "," (T.pack str)
+      pDomains <- mapM parseOptWildcardDomain domains
+      let (fqdns, wcs) = (lefts pDomains, rights pDomains)
+      return $ CCAllowedOrigins $ Domains (Set.fromList fqdns) (Set.fromList wcs)
 
 data CorsPolicy = CorsPolicy
   { cpConfig :: !CorsConfig,
@@ -103,7 +113,7 @@ mkDefaultCorsPolicy cfg =
 
 inWildcardList :: Domains -> Text -> Bool
 inWildcardList (Domains _ wildcards) origin =
-  either (const False) (`Set.member` wildcards) $ parseOrigin origin
+  any (`Set.member` wildcards) $ parseOrigin origin
 
 -- | Parsers for wildcard domains
 runParser :: AT.Parser a -> Text -> Either String a

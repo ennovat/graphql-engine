@@ -4,76 +4,86 @@ module Hasura.GraphQL.Schema.RemoteRelationship
 where
 
 import Control.Lens
-import Data.Has
-import Data.HashMap.Strict.Extended qualified as Map
+import Data.HashMap.Strict.Extended qualified as HashMap
 import Data.List.NonEmpty qualified as NE
+import Data.Text.Casing qualified as C
 import Data.Text.Extended
+import Hasura.Authentication.Role (adminRoleName)
 import Hasura.Base.Error
-import Hasura.GraphQL.Execute.Types qualified as ET
-import Hasura.GraphQL.Parser
-import Hasura.GraphQL.Parser qualified as P
-import Hasura.GraphQL.Parser.Internal.Parser qualified as P
 import Hasura.GraphQL.Schema.Backend
 import Hasura.GraphQL.Schema.Common
 import Hasura.GraphQL.Schema.Instances ()
+import Hasura.GraphQL.Schema.Parser (FieldParser, MonadMemoize)
+import Hasura.GraphQL.Schema.Parser qualified as P
 import Hasura.GraphQL.Schema.Remote
-import Hasura.GraphQL.Schema.Select
 import Hasura.GraphQL.Schema.Table
+import Hasura.Name qualified as Name
 import Hasura.Prelude
-import Hasura.RQL.DDL.RemoteRelationship.Validate
 import Hasura.RQL.IR qualified as IR
 import Hasura.RQL.Types.Common (FieldName, RelType (..), relNameToTxt)
 import Hasura.RQL.Types.Relationships.Remote
-import Hasura.RQL.Types.Relationships.ToSchema
-import Hasura.RQL.Types.Relationships.ToSchema qualified as Remote
-import Hasura.RQL.Types.RemoteSchema
 import Hasura.RQL.Types.ResultCustomization
-import Hasura.RQL.Types.SchemaCache
-import Hasura.RQL.Types.SourceCustomization (mkCustomizedTypename)
+import Hasura.RQL.Types.Schema.Options
+import Hasura.RQL.Types.SchemaCache hiding (askTableInfo)
+import Hasura.RQL.Types.Source
+import Hasura.RQL.Types.SourceCustomization
+import Hasura.RemoteSchema.Metadata
+import Hasura.RemoteSchema.SchemaCache
+import Hasura.RemoteSchema.SchemaCache qualified as Remote
 import Hasura.SQL.AnyBackend
-import Hasura.Session
 import Language.GraphQL.Draft.Syntax qualified as G
 
 -- | Remote relationship field parsers
 remoteRelationshipField ::
-  forall r m n lhsJoinField.
-  (MonadBuildSchemaBase r m n) =>
-  RemoteFieldInfo lhsJoinField ->
-  m (Maybe [FieldParser n (IR.RemoteRelationshipField UnpreparedValue)])
-remoteRelationshipField RemoteFieldInfo {..} = do
-  queryType <- asks $ qcQueryType . getter
-  -- https://github.com/hasura/graphql-engine/issues/5144
-  -- The above issue is easily fixable by removing the following guard and 'MaybeT' monad transformation
-  void $ runMaybeT $ guard $ queryType == ET.QueryHasura
-  case _rfiRHS of
-    RFISource anyRemoteSourceFieldInfo ->
-      dispatchAnyBackend @BackendSchema anyRemoteSourceFieldInfo \remoteSourceFieldInfo ->
-        -- the fmap soup here is to go over all the IR.RemoteSourceSelect and
-        -- wrap them as 'IR.RemoteRelationshipField's
-        Just . map (fmap (IR.RemoteSourceField . mkAnyBackend))
-          <$> remoteRelationshipToSourceField remoteSourceFieldInfo
-    RFISchema remoteSchema ->
-      fmap (pure . fmap IR.RemoteSchemaField)
-        <$> remoteRelationshipToSchemaField _rfiLHS remoteSchema
+  SchemaContext ->
+  SchemaOptions ->
+  SourceCache ->
+  RemoteSchemaMap ->
+  RemoteSchemaPermissions ->
+  RemoteSourceRelationshipBuilder ->
+  RemoteRelationshipParserBuilder
+remoteRelationshipField schemaContext schemaOptions sourceCache remoteSchemaCache remoteSchemaPermissions remoteSourceRelationshipBuilder = RemoteRelationshipParserBuilder
+  \RemoteFieldInfo {..} -> lift do
+    case _rfiRHS of
+      RFISource anyRemoteSourceFieldInfo ->
+        -- see Note [SchemaT and stacking]
+        case remoteSourceRelationshipBuilder of
+          IncludeRemoteSourceRelationship -> dispatchAnyBackendWithTwoConstraints @BackendSchema @BackendTableSelectSchema
+            anyRemoteSourceFieldInfo
+            \remoteSourceFieldInfo -> do
+              fields <- remoteRelationshipToSourceField schemaContext schemaOptions sourceCache remoteSourceFieldInfo
+              pure $ Just $ fmap (IR.RemoteSourceField . mkAnyBackend) <$> fields
+          ExcludeRemoteSourceRelationship -> pure Nothing
+      RFISchema remoteSchema ->
+        -- see Note [SchemaT and stacking]
+        runRemoteSchema schemaContext (soRemoteNullForwardingPolicy schemaOptions) do
+          fields <- remoteRelationshipToSchemaField remoteSchemaCache remoteSchemaPermissions _rfiLHS remoteSchema
+          pure $ fmap (pure . fmap IR.RemoteSchemaField) fields
 
 -- | Parser(s) for remote relationship fields to a remote schema
 remoteRelationshipToSchemaField ::
   forall r m n lhsJoinField.
-  (MonadBuildSchemaBase r m n) =>
-  Map.HashMap FieldName lhsJoinField ->
+  (MonadBuildRemoteSchema r m n) =>
+  RemoteSchemaMap ->
+  RemoteSchemaPermissions ->
+  HashMap.HashMap FieldName lhsJoinField ->
   RemoteSchemaFieldInfo ->
-  m (Maybe (FieldParser n IR.RemoteSchemaSelect))
-remoteRelationshipToSchemaField lhsFields RemoteSchemaFieldInfo {..} = runMaybeT do
-  remoteRelationshipQueryCtx <- asks $ qcRemoteRelationshipContext . getter
-  RemoteRelationshipQueryContext roleIntrospectionResultOriginal _ remoteSchemaCustomizer <-
-    -- The remote relationship field should not be accessible
-    -- if the remote schema is not accessible to the said role
-    hoistMaybe $ Map.lookup _rrfiRemoteSchemaName remoteRelationshipQueryCtx
-  role <- askRoleName
-  let hasuraFieldNames = Map.keysSet lhsFields
+  SchemaT r m (Maybe (FieldParser n (IR.RemoteSchemaSelect (IR.RemoteRelationshipField IR.UnpreparedValue))))
+remoteRelationshipToSchemaField remoteSchemaCache remoteSchemaPermissions lhsFields RemoteSchemaFieldInfo {..} = runMaybeT do
+  roleName <- retrieve scRole
+  remoteSchemaContext <-
+    HashMap.lookup _rrfiRemoteSchemaName remoteSchemaCache
+      `onNothing` throw500 ("invalid remote schema name: " <>> _rrfiRemoteSchemaName)
+  introspection <- hoistMaybe $ getIntrospectionResult remoteSchemaPermissions roleName remoteSchemaContext
+  let remoteSchemaRelationships = _rscRemoteRelationships remoteSchemaContext
+      roleIntrospection = irDoc introspection
+      remoteSchemaRoot = irQueryRoot introspection
+      remoteSchemaCustomizer = rsCustomizer $ _rscInfo remoteSchemaContext
+      RemoteSchemaIntrospection typeDefns = roleIntrospection
+  let hasuraFieldNames = HashMap.keysSet lhsFields
       relationshipDef = ToSchemaRelationshipDef _rrfiRemoteSchemaName hasuraFieldNames _rrfiRemoteFields
   (newInpValDefns :: [G.TypeDefinition [G.Name] RemoteSchemaInputValueDefinition], remoteFieldParamMap) <-
-    if role == adminRoleName
+    if roleName == adminRoleName
       then do
         -- we don't validate the remote relationship when the role is admin
         -- because it's already been validated, when the remote relationship
@@ -81,55 +91,56 @@ remoteRelationshipToSchemaField lhsFields RemoteSchemaFieldInfo {..} = runMaybeT
         pure (_rrfiInputValueDefinitions, _rrfiParamMap)
       else do
         (_, roleRemoteField) <-
-          afold @(Either _) $
+          afold @(Either _)
+            $
             -- TODO: this really needs to go way, we shouldn't be doing
             -- validation when building parsers
-            validateToSchemaRelationship relationshipDef _rrfiLHSIdentifier _rrfiName (_rrfiRemoteSchema, roleIntrospectionResultOriginal) lhsFields
+            validateToSchemaRelationship relationshipDef _rrfiLHSIdentifier _rrfiName (_rrfiRemoteSchema, introspection) lhsFields
         pure (Remote._rrfiInputValueDefinitions roleRemoteField, Remote._rrfiParamMap roleRemoteField)
-  let roleIntrospection@(RemoteSchemaIntrospection typeDefns) = irDoc roleIntrospectionResultOriginal
-      -- add the new input value definitions created by the remote relationship
+  let -- add the new input value definitions created by the remote relationship
       -- to the existing schema introspection of the role
-      remoteRelationshipIntrospection = RemoteSchemaIntrospection $ typeDefns <> Map.fromListOn getTypeName newInpValDefns
+      remoteRelationshipIntrospection = RemoteSchemaIntrospection $ typeDefns <> HashMap.fromListOn getTypeName newInpValDefns
   fieldName <- textToName $ relNameToTxt _rrfiName
 
   -- This selection set parser, should be of the remote node's selection set parser, which comes
   -- from the fieldCall
   let fieldCalls = unRemoteFields _rrfiRemoteFields
-      parentTypeName = irQueryRoot roleIntrospectionResultOriginal
-  nestedFieldType <- lift $ lookupNestedFieldType parentTypeName roleIntrospection fieldCalls
+  nestedFieldType <- lift $ lookupNestedFieldType remoteSchemaRoot roleIntrospection fieldCalls
   let typeName = G.getBaseType nestedFieldType
   fieldTypeDefinition <-
     onNothing (lookupType roleIntrospection typeName)
-    -- the below case will never happen because we get the type name
-    -- from the schema document itself i.e. if a field exists for the
-    -- given role, then it's return type also must exist
-    $
-      throw500 $ "unexpected: " <> typeName <<> " not found "
+      -- the below case will never happen because we get the type name
+      -- from the schema document itself i.e. if a field exists for the
+      -- given role, then it's return type also must exist
+      $ throw500
+      $ "unexpected: "
+      <> typeName
+      <<> " not found "
   -- These are the arguments that are given by the user while executing a query
-  let remoteFieldUserArguments = map snd $ Map.toList remoteFieldParamMap
+  let remoteFieldUserArguments = map snd $ HashMap.toList remoteFieldParamMap
   remoteFld <-
-    withRemoteSchemaCustomization remoteSchemaCustomizer $
-      lift $
-        P.wrapFieldParser nestedFieldType
-          <$> remoteField remoteRelationshipIntrospection parentTypeName fieldName Nothing remoteFieldUserArguments fieldTypeDefinition
+    withRemoteSchemaCustomization remoteSchemaCustomizer
+      $ lift
+      $ P.wrapFieldParser nestedFieldType
+      <$> remoteField remoteRelationshipIntrospection remoteSchemaRelationships remoteSchemaRoot fieldName Nothing remoteFieldUserArguments fieldTypeDefinition
 
-  pure $
-    remoteFld
-      `P.bindField` \fld@G.Field {G._fArguments = args, G._fSelectionSet = selSet, G._fName = fname} -> do
-        let remoteArgs =
-              Map.toList args <&> \(argName, argVal) -> IR.RemoteFieldArgument argName $ P.GraphQLValue argVal
-        let resultCustomizer =
-              applyFieldCalls fieldCalls $
-                applyAliasMapping (singletonAliasMapping fname (fcName $ NE.last fieldCalls)) $
-                  makeResultCustomizer remoteSchemaCustomizer fld
-        pure $
-          IR.RemoteSchemaSelect
-            { IR._rselArgs = remoteArgs,
-              IR._rselResultCustomizer = resultCustomizer,
-              IR._rselSelection = selSet,
-              IR._rselFieldCall = fieldCalls,
-              IR._rselRemoteSchema = _rrfiRemoteSchema
-            }
+  pure
+    $ remoteFld
+    `P.bindField` \fld@IR.GraphQLField {IR._fArguments = args, IR._fSelectionSet = selSet, IR._fName = fname} -> do
+      let remoteArgs =
+            HashMap.toList args <&> \(argName, argVal) -> IR.RemoteFieldArgument argName $ P.GraphQLValue argVal
+      let resultCustomizer =
+            applyFieldCalls fieldCalls
+              $ applyAliasMapping (singletonAliasMapping fname (fcName $ NE.last fieldCalls))
+              $ makeResultCustomizer remoteSchemaCustomizer fld
+      pure
+        $ IR.RemoteSchemaSelect
+          { IR._rselArgs = remoteArgs,
+            IR._rselResultCustomizer = resultCustomizer,
+            IR._rselSelection = selSet,
+            IR._rselFieldCall = fieldCalls,
+            IR._rselRemoteSchema = _rrfiRemoteSchema
+          }
   where
     -- Apply parent field calls so that the result customizer modifies the nested field
     applyFieldCalls :: NonEmpty FieldCall -> ResultCustomizer -> ResultCustomizer
@@ -137,11 +148,11 @@ remoteRelationshipToSchemaField lhsFields RemoteSchemaFieldInfo {..} = runMaybeT
       foldr (modifyFieldByName . fcName) resultCustomizer $ NE.init fieldCalls
 
 lookupNestedFieldType' ::
-  (MonadSchema n m, MonadError QErr m) =>
+  (MonadMemoize m, MonadError QErr m) =>
   G.Name ->
   RemoteSchemaIntrospection ->
   FieldCall ->
-  m G.GType
+  SchemaT r m G.GType
 lookupNestedFieldType' parentTypeName remoteSchemaIntrospection (FieldCall fcName _) =
   case lookupObject remoteSchemaIntrospection parentTypeName of
     Nothing -> throw400 RemoteSchemaError $ "object with name " <> parentTypeName <<> " not found"
@@ -151,11 +162,11 @@ lookupNestedFieldType' parentTypeName remoteSchemaIntrospection (FieldCall fcNam
         Just G.FieldDefinition {..} -> pure _fldType
 
 lookupNestedFieldType ::
-  (MonadSchema n m, MonadError QErr m) =>
+  (MonadMemoize m, MonadError QErr m) =>
   G.Name ->
   RemoteSchemaIntrospection ->
   NonEmpty FieldCall ->
-  m G.GType
+  SchemaT r m G.GType
 lookupNestedFieldType parentTypeName remoteSchemaIntrospection (fieldCall :| rest) = do
   fieldType <- lookupNestedFieldType' parentTypeName remoteSchemaIntrospection fieldCall
   case NE.nonEmpty rest of
@@ -168,34 +179,55 @@ lookupNestedFieldType parentTypeName remoteSchemaIntrospection (fieldCall :| res
 -- declaration would have the '_aggregate' field in addition to the array
 -- relationship field, hence [FieldParser ...] instead of 'FieldParser'
 remoteRelationshipToSourceField ::
-  forall r m n tgt.
-  (MonadBuildSchemaBase r m n, BackendSchema tgt) =>
+  forall m n tgt.
+  ( MonadError QErr m,
+    P.MonadMemoize m,
+    P.MonadParse n,
+    BackendSchema tgt,
+    BackendTableSelectSchema tgt
+  ) =>
+  SchemaContext ->
+  SchemaOptions ->
+  SourceCache ->
   RemoteSourceFieldInfo tgt ->
-  m [FieldParser n (IR.RemoteSourceSelect (IR.RemoteRelationshipField UnpreparedValue) UnpreparedValue tgt)]
-remoteRelationshipToSourceField RemoteSourceFieldInfo {..} =
-  withTypenameCustomization (mkCustomizedTypename $ Just _rsfiSourceCustomization) do
-    tableInfo <- askTableInfo @tgt _rsfiSource _rsfiTable
+  m [FieldParser n (IR.RemoteSourceSelect (IR.RemoteRelationshipField IR.UnpreparedValue) IR.UnpreparedValue tgt)]
+remoteRelationshipToSourceField context options sourceCache RemoteSourceFieldInfo {..} = do
+  sourceInfo <-
+    onNothing (unsafeSourceInfo @tgt =<< HashMap.lookup _rsfiSource sourceCache)
+      $ throw500
+      $ "source not found "
+      <> dquote _rsfiSource
+  runSourceSchema context options sourceInfo do
+    let roleName = scRole context
+        tCase = _rscNamingConvention $ _siCustomization sourceInfo
+    tableInfo <- askTableInfo _rsfiTable
     fieldName <- textToName $ relNameToTxt _rsfiName
-    maybePerms <- tableSelectPermissions @tgt tableInfo
-    case maybePerms of
+    case tableSelectPermissions @tgt roleName tableInfo of
       Nothing -> pure []
       Just tablePerms -> do
         parsers <- case _rsfiType of
           ObjRel -> do
-            selectionSetParser <- tableSelectionSet _rsfiSource tableInfo tablePerms
-            pure . pure $
-              subselection_ fieldName Nothing selectionSetParser <&> \fields ->
-                IR.SourceRelationshipObject $
-                  IR.AnnObjectSelectG fields _rsfiTable $ IR._tpFilter $ tablePermissionsInfo tablePerms
+            selectionSetParserM <- tableSelectionSet tableInfo
+            pure $ case selectionSetParserM of
+              Nothing -> []
+              Just selectionSetParser ->
+                pure
+                  $ P.subselection_ fieldName Nothing selectionSetParser
+                  <&> \fields ->
+                    IR.SourceRelationshipObject
+                      $ IR.AnnObjectSelectG fields (IR.FromTable _rsfiTable)
+                      $ IR._tpFilter
+                      $ tablePermissionsInfo tablePerms
           ArrRel -> do
-            let aggFieldName = fieldName <> $$(G.litName "_aggregate")
-            selectionSetParser <- selectTable _rsfiSource tableInfo fieldName Nothing tablePerms
-            aggSelectionSetParser <- selectTableAggregate _rsfiSource tableInfo aggFieldName Nothing tablePerms
-            pure $
-              catMaybes
-                [ Just $ selectionSetParser <&> IR.SourceRelationshipArray,
+            let aggFieldName = applyFieldNameCaseIdentifier tCase $ C.fromAutogeneratedTuple (fieldName, [G.convertNameToSuffix Name._aggregate])
+            selectionSetParser <- selectTable tableInfo fieldName Nothing
+            aggSelectionSetParser <- selectTableAggregate tableInfo aggFieldName Nothing
+            pure
+              $ catMaybes
+                [ selectionSetParser <&> fmap IR.SourceRelationshipArray,
                   aggSelectionSetParser <&> fmap IR.SourceRelationshipArrayAggregate
                 ]
-        pure $
-          parsers <&> fmap \select ->
-            IR.RemoteSourceSelect _rsfiSource _rsfiSourceConfig select _rsfiMapping
+        pure
+          $ parsers
+          <&> fmap \select ->
+            IR.RemoteSourceSelect _rsfiSource _rsfiSourceConfig select _rsfiMapping (soStringifyNumbers options)

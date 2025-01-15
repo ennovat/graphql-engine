@@ -1,3 +1,6 @@
+-- | Postgres Translate Returning
+--
+-- Combinators and helpers for dealing with GraphQL returning statements.
 module Hasura.Backends.Postgres.Translate.Returning
   ( MutationCTE (..),
     getMutationCTE,
@@ -8,35 +11,42 @@ module Hasura.Backends.Postgres.Translate.Returning
     mkMutationOutputExp,
     checkConstraintIdentifier,
     asCheckErrorExtractor,
-    checkRetCols,
   )
 where
 
 import Data.Coerce
+import Hasura.Authentication.User (UserInfo)
 import Hasura.Backends.Postgres.SQL.DML qualified as S
 import Hasura.Backends.Postgres.SQL.Types
 import Hasura.Backends.Postgres.Translate.Select
-import Hasura.Base.Error
+import Hasura.Backends.Postgres.Translate.Select.Internal.Helpers (customSQLToTopLevelCTEs)
+import Hasura.Backends.Postgres.Translate.Types (CustomSQLCTEs)
+import Hasura.Base.Error (QErr)
 import Hasura.Prelude
-import Hasura.RQL.DML.Internal
+import Hasura.RQL.IR.BoolExp
 import Hasura.RQL.IR.Returning
 import Hasura.RQL.IR.Select
-import Hasura.RQL.Types
-import Hasura.Session
+import Hasura.RQL.Types.Backend
+import Hasura.RQL.Types.BackendType
+import Hasura.RQL.Types.Column
+import Hasura.RQL.Types.Common
+import Hasura.RQL.Types.NamingCase (NamingCase)
+import Hasura.RQL.Types.Schema.Options qualified as Options
+import Hasura.Table.Cache
 
 -- | The postgres common table expression (CTE) for mutation queries.
 -- This CTE expression is used to generate mutation field output expression,
 -- see Note [Mutation output expression].
 data MutationCTE
   = -- | A Mutation with check constraint validation (Insert or Update)
-    MCCheckConstraint !S.CTE
+    MCCheckConstraint S.TopLevelCTE
   | -- | A Select statement which emits mutated table rows
-    MCSelectValues !S.Select
+    MCSelectValues S.Select
   | -- | A Delete statement
-    MCDelete !S.SQLDelete
+    MCDelete S.SQLDelete
   deriving (Show, Eq)
 
-getMutationCTE :: MutationCTE -> S.CTE
+getMutationCTE :: MutationCTE -> S.TopLevelCTE
 getMutationCTE = \case
   MCCheckConstraint cte -> cte
   MCSelectValues select -> S.CTESelect select
@@ -50,20 +60,20 @@ checkPermissionRequired = \case
 
 pgColsToSelFlds ::
   forall pgKind.
-  Backend ('Postgres pgKind) =>
+  (Backend ('Postgres pgKind)) =>
   [ColumnInfo ('Postgres pgKind)] ->
   [(FieldName, AnnField ('Postgres pgKind))]
 pgColsToSelFlds cols =
-  flip map cols $
-    \pgColInfo ->
-      ( fromCol @('Postgres pgKind) $ pgiColumn pgColInfo,
-        mkAnnColumnField (pgiColumn pgColInfo) (pgiType pgColInfo) Nothing Nothing
+  flip map cols
+    $ \pgColInfo ->
+      ( fromCol @('Postgres pgKind) $ ciColumn pgColInfo,
+        mkAnnColumnField (ciColumn pgColInfo) (ciType pgColInfo) NoRedaction Nothing
         --  ^^ Nothing because mutations aren't supported
         --  with inherited role
       )
 
 mkDefaultMutFlds ::
-  Backend ('Postgres pgKind) =>
+  (Backend ('Postgres pgKind)) =>
   Maybe [ColumnInfo ('Postgres pgKind)] ->
   MutationOutput ('Postgres pgKind)
 mkDefaultMutFlds =
@@ -75,39 +85,47 @@ mkDefaultMutFlds =
 
 mkMutFldExp ::
   ( Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind
+    PostgresTranslateSelect pgKind,
+    MonadWriter CustomSQLCTEs m,
+    MonadIO m,
+    MonadError QErr m
   ) =>
-  Identifier ->
+  UserInfo ->
+  TableIdentifier ->
   Maybe Int ->
-  Bool ->
+  Options.StringifyNumbers ->
+  Maybe NamingCase ->
   MutFld ('Postgres pgKind) ->
-  S.SQLExp
-mkMutFldExp cteAlias preCalAffRows strfyNum = \case
+  m S.SQLExp
+mkMutFldExp userInfo cteAlias preCalAffRows strfyNum tCase = \case
   MCount ->
     let countExp =
-          S.SESelect $
-            S.mkSelect
+          S.SESelect
+            $ S.mkSelect
               { S.selExtr = [S.Extractor S.countStar Nothing],
                 S.selFrom = Just $ S.FromExp $ pure $ S.FIIdentifier cteAlias
               }
-     in maybe countExp (S.SEUnsafe . tshow) preCalAffRows
-  MExp t -> S.SELit t
+     in pure $ maybe countExp (S.SEUnsafe . tshow) preCalAffRows
+  MExp t -> pure $ S.SELit t
   MRet selFlds ->
     let tabFrom = FromIdentifier $ toFIIdentifier cteAlias
         tabPerm = TablePerm annBoolExpTrue Nothing
-     in S.SESelect $
-          mkSQLSelect JASMultipleRows $
-            AnnSelectG selFlds tabFrom tabPerm noSelectArgs strfyNum
+     in S.SESelect
+          <$> mkSQLSelect
+            userInfo
+            JASMultipleRows
+            ( AnnSelectG selFlds tabFrom tabPerm noSelectArgs strfyNum tCase
+            )
 
-toFIIdentifier :: Identifier -> FIIdentifier
-toFIIdentifier = coerce . getIdenTxt
+toFIIdentifier :: TableIdentifier -> FIIdentifier
+toFIIdentifier = coerce . unTableIdentifier
 {-# INLINE toFIIdentifier #-}
 
 {- Note [Mutation output expression]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 An example output expression for INSERT mutation:
 
-WITH "<table-name>__mutation_result_alias" AS (
+WITH "mra__<table-name>" AS (
   INSERT INTO <table-name> (<insert-column>[..])
   VALUES
     (<insert-value-row>[..])
@@ -115,76 +133,96 @@ WITH "<table-name>__mutation_result_alias" AS (
     -- An extra column expression which performs the 'CHECK' validation
     (<CHECK Condition>) AS "check__constraint"
 ),
-"<table-name>__all_columns_alias" AS (
+"aca__<table-name>" AS (
   -- Only extract columns from mutated rows. Columns sorted by ordinal position so that
   -- resulted rows can be casted to table type.
   SELECT (<table-column>[..])
   FROM
-    "<table-name>__mutation_result_alias"
+    "mra__<table-name>"
 )
-<SELECT statement to generate mutation response using '<table-name>__all_columns_alias' as FROM
- and bool_and("check__constraint") from "<table-name>__mutation_result_alias">
+<SELECT statement to generate mutation response using 'aca__<table-name>' as FROM
+ and bool_and("check__constraint") from "mra__<table-name>">
 -}
 
 -- | Generate mutation output expression with given mutation CTE statement.
 -- See Note [Mutation output expression].
 mkMutationOutputExp ::
   ( Backend ('Postgres pgKind),
-    PostgresAnnotatedFieldJSON pgKind
+    PostgresTranslateSelect pgKind,
+    MonadIO m,
+    MonadError QErr m
   ) =>
+  UserInfo ->
   QualifiedTable ->
   [ColumnInfo ('Postgres pgKind)] ->
   Maybe Int ->
   MutationCTE ->
   MutationOutput ('Postgres pgKind) ->
-  Bool ->
-  S.SelectWith
-mkMutationOutputExp qt allCols preCalAffRows cte mutOutput strfyNum =
-  S.SelectWith
-    [ (S.Alias mutationResultAlias, getMutationCTE cte),
-      (S.Alias allColumnsAlias, allColumnsSelect)
-    ]
-    sel
+  Options.StringifyNumbers ->
+  Maybe NamingCase ->
+  m S.SelectWith
+mkMutationOutputExp userInfo qt allCols preCalAffRows cte mutOutput strfyNum tCase = do
+  (sel, customSQLCTEs) <- runWriterT writerSelect
+  pure
+    $ S.SelectWith
+      ( [ (mutationResultAlias, getMutationCTE cte),
+          (allColumnsAlias, allColumnsSelect)
+        ]
+          <> customSQLToTopLevelCTEs customSQLCTEs
+      )
+      sel
   where
-    mutationResultAlias = Identifier $ snakeCaseQualifiedObject qt <> "__mutation_result_alias"
-    allColumnsAlias = Identifier $ snakeCaseQualifiedObject qt <> "__all_columns_alias"
+    mutationResultAlias = S.mkTableAlias $ "mra__" <> snakeCaseQualifiedObject qt
+    mutationResultIdentifier = S.tableAliasToIdentifier mutationResultAlias
+    allColumnsAlias = S.mkTableAlias $ "aca__" <> snakeCaseQualifiedObject qt
+    allColumnsIdentifier = S.tableAliasToIdentifier allColumnsAlias
     allColumnsSelect =
-      S.CTESelect $
-        S.mkSelect
-          { S.selExtr = map (S.mkExtr . pgiColumn) (sortCols allCols),
-            S.selFrom = Just $ S.mkIdenFromExp mutationResultAlias
+      S.CTESelect
+        $ S.mkSelect
+          { S.selExtr = map (S.mkExtr . ciColumn) (sortCols allCols),
+            S.selFrom = Just $ S.mkIdenFromExp mutationResultIdentifier
           }
 
-    sel =
-      S.mkSelect
-        { S.selExtr =
-            S.Extractor extrExp Nothing :
-            bool [] [S.Extractor checkErrorExp Nothing] (checkPermissionRequired cte)
-        }
+    writerSelect =
+      ( \extrExp ->
+          S.mkSelect
+            { S.selExtr =
+                S.Extractor extrExp Nothing
+                  : bool [] [S.Extractor checkErrorExp Nothing] (checkPermissionRequired cte)
+            }
+      )
+        <$> writerExtrExp
       where
-        checkErrorExp = mkCheckErrorExp mutationResultAlias
-        extrExp = case mutOutput of
-          MOutMultirowFields mutFlds ->
-            let jsonBuildObjArgs = flip concatMap mutFlds $
-                  \(FieldName k, mutFld) ->
-                    [ S.SELit k,
-                      mkMutFldExp allColumnsAlias preCalAffRows strfyNum mutFld
-                    ]
-             in S.SEFnApp "json_build_object" jsonBuildObjArgs Nothing
-          MOutSinglerowObject annFlds ->
-            let tabFrom = FromIdentifier $ toFIIdentifier allColumnsAlias
-                tabPerm = TablePerm annBoolExpTrue Nothing
-             in S.SESelect $
-                  mkSQLSelect JASSingleObject $
-                    AnnSelectG annFlds tabFrom tabPerm noSelectArgs strfyNum
+        checkErrorExp = mkCheckErrorExp mutationResultIdentifier
 
-mkCheckErrorExp :: IsIdentifier a => a -> S.SQLExp
+        writerExtrExp :: (MonadIO m, MonadError QErr m) => WriterT CustomSQLCTEs m S.SQLExp
+        writerExtrExp = case mutOutput of
+          MOutMultirowFields mutFlds -> do
+            jsonBuildObjArgs <-
+              traverse
+                ( \(FieldName k, mutFld) -> do
+                    mutFldExp <- mkMutFldExp userInfo allColumnsIdentifier preCalAffRows strfyNum tCase mutFld
+                    pure [S.SELit k, mutFldExp]
+                )
+                mutFlds
+            pure $ S.SEFnApp "json_build_object" (concat jsonBuildObjArgs) Nothing
+          MOutSinglerowObject annFlds ->
+            let tabFrom = FromIdentifier $ toFIIdentifier allColumnsIdentifier
+                tabPerm = TablePerm annBoolExpTrue Nothing
+             in S.SESelect
+                  <$> mkSQLSelect
+                    userInfo
+                    JASSingleObject
+                    ( AnnSelectG annFlds tabFrom tabPerm noSelectArgs strfyNum tCase
+                    )
+
+mkCheckErrorExp :: TableIdentifier -> S.SQLExp
 mkCheckErrorExp alias =
   let boolAndCheckConstraint =
-        S.handleIfNull (S.SEBool $ S.BELit True) $
-          S.SEFnApp "bool_and" [S.SEIdentifier checkConstraintIdentifier] Nothing
-   in S.SESelect $
-        S.mkSelect
+        S.handleIfNull (S.SEBool $ S.BELit True)
+          $ S.SEFnApp "bool_and" [S.SEIdentifier checkConstraintIdentifier] Nothing
+   in S.SESelect
+        $ S.mkSelect
           { S.selExtr = [S.Extractor boolAndCheckConstraint Nothing],
             S.selFrom = Just $ S.mkIdenFromExp alias
           }
@@ -194,16 +232,4 @@ checkConstraintIdentifier = Identifier "check__constraint"
 
 asCheckErrorExtractor :: S.SQLExp -> S.Extractor
 asCheckErrorExtractor s =
-  S.Extractor s $ Just $ S.Alias checkConstraintIdentifier
-
-checkRetCols ::
-  (Backend ('Postgres pgKind), UserInfoM m, QErrM m) =>
-  FieldInfoMap (FieldInfo ('Postgres pgKind)) ->
-  SelPermInfo ('Postgres pgKind) ->
-  [PGCol] ->
-  m [ColumnInfo ('Postgres pgKind)]
-checkRetCols fieldInfoMap selPermInfo cols = do
-  mapM_ (checkSelOnCol selPermInfo) cols
-  forM cols $ \col -> askColInfo fieldInfoMap col relInRetErr
-  where
-    relInRetErr = "Relationships can't be used in \"returning\"."
+  S.Extractor s $ Just $ S.toColumnAlias checkConstraintIdentifier

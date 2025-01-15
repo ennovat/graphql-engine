@@ -6,16 +6,16 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
 	"github.com/hasura/graphql-engine/cli/v2/internal/metadataobject"
 	"github.com/hasura/graphql-engine/cli/v2/internal/metadatautil"
 
 	"github.com/sirupsen/logrus"
 
-	"github.com/goccy/go-yaml"
 	"github.com/hasura/graphql-engine/cli/v2"
-	goyaml "gopkg.in/yaml.v2"
-	v3yaml "gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -25,15 +25,20 @@ const (
 )
 
 type SourceWithNormalFields struct {
-	Name          string      `yaml:"name"`
-	Kind          string      `yaml:"kind"`
-	Configuration interface{} `yaml:"configuration"`
-	QueryTags     interface{} `yaml:"query_tags,omitempty"`
+	Name             string    `yaml:"name"`
+	Kind             string    `yaml:"kind"`
+	Configuration    yaml.Node `yaml:"configuration"`
+	QueryTags        yaml.Node `yaml:"query_tags,omitempty"`
+	Customization    yaml.Node `yaml:"customization,omitempty"`
+	HealthCheck      yaml.Node `yaml:"health_check,omitempty"`
+	LogicalModels    yaml.Node `yaml:"logical_models,omitempty"`
+	NativeQueries    yaml.Node `yaml:"native_queries,omitempty"`
+	StoredProcedures yaml.Node `yaml:"stored_procedures,omitempty"`
 }
 type Source struct {
 	SourceWithNormalFields `yaml:",inline"`
-	Tables                 interface{} `yaml:"tables"`
-	Functions              interface{} `yaml:"functions,omitempty"`
+	Tables                 yaml.Node `yaml:"tables"`
+	Functions              yaml.Node `yaml:"functions,omitempty"`
 }
 
 type SourceConfig struct {
@@ -54,245 +59,257 @@ func (t *SourceConfig) Validate() error {
 }
 
 func (t *SourceConfig) CreateFiles() error {
+	var op errors.Op = "sources.SourceConfig.CreateFiles"
 	v := make([]interface{}, 0)
-	data, err := yaml.Marshal(v)
+	buf := new(bytes.Buffer)
+	err := metadataobject.GetEncoder(buf).Encode(v)
 	if err != nil {
-		return err
+		return errors.E(op, err)
 	}
 	path := filepath.Join(t.MetadataDir, sourcesDirectory, t.Filename())
 	if err := os.MkdirAll(filepath.Dir(path), 0744); err != nil {
-		return err
+		return errors.E(op, err)
 	}
-	err = ioutil.WriteFile(path, data, 0644)
+	err = ioutil.WriteFile(path, buf.Bytes(), 0644)
 	if err != nil {
-		return err
+		return errors.E(op, err)
 	}
 	return nil
 }
 
-func (t *SourceConfig) Build(metadata *goyaml.MapSlice) metadataobject.ErrParsingMetadataObject {
+func (t *SourceConfig) Build() (map[string]interface{}, error) {
+	var op errors.Op = "sources.SourceConfig.Build"
 	sourceFile := filepath.Join(t.MetadataDir, sourcesDirectory, t.Filename())
-	sourcesBytes, err := ioutil.ReadFile(sourceFile)
+	sourcesBytes, err := metadataobject.ReadMetadataFile(sourceFile)
 	if err != nil {
-		return t.error(err)
+		return nil, errors.E(op, t.error(err))
 	}
 	// unmarshal everything else except tables and functions
-	var sourceNormalFields []SourceWithNormalFields
-	if err := v3yaml.Unmarshal(sourcesBytes, &sourceNormalFields); err != nil {
-		return t.error(fmt.Errorf("parsing error: %w", err))
+	var sourceNormalFields []Source
+	if err := yaml.Unmarshal(sourcesBytes, &sourceNormalFields); err != nil {
+		return nil, errors.E(op, t.error(fmt.Errorf("parsing error: %w", err)))
 	}
 	var sources []Source
-	for idx, minisource := range sourceNormalFields {
-		source := Source{
-			SourceWithNormalFields: minisource,
-		}
-
-		// get tables node
-		tablepath, err := yaml.PathString(fmt.Sprintf("$[%d].tables", idx))
-		if err != nil {
-			return t.error(err)
-		}
-		tableNode, err := tablepath.ReadNode(bytes.NewReader(sourcesBytes))
-		if err == nil {
-			tableNodeBytes, err := ioutil.ReadAll(tableNode)
+	for _, source := range sourceNormalFields {
+		if !source.Tables.IsZero() {
+			tableNodeBytes, err := yaml.Marshal(source.Tables)
 			if err != nil {
-				return t.error(err)
+				return nil, errors.E(op, t.error(err))
 			}
-			var tablesKey interface{}
-			err = v3yaml.Unmarshal(tableNodeBytes, metadatautil.NewYamlDecoder(
+			var tablesKey yaml.Node
+			err = yaml.Unmarshal(tableNodeBytes, metadatautil.NewYamlDecoder(
 				metadatautil.YamlDecoderOpts{
 					IncludeTagBaseDirectory: filepath.Join(t.MetadataDir, sourcesDirectory),
 				},
 				&tablesKey,
 			))
 			if err != nil {
-				return t.error(err)
+				return nil, errors.E(op, t.error(err))
 			}
 			source.Tables = tablesKey
-		} else {
-			t.logger.Debugf("building metadata: table node not found for %s", source.Name)
-		}
 
-		// get functions node
-		functionsPath, err := yaml.PathString(fmt.Sprintf("$[%d].functions", idx))
-		if err != nil {
-			return t.error(err)
 		}
-		functionsNode, err := functionsPath.ReadNode(bytes.NewReader(sourcesBytes))
-		if err == nil {
-			functionsNodeBytes, err := ioutil.ReadAll(functionsNode)
+		if !source.Functions.IsZero() {
+			functionsNodeBytes, err := yaml.Marshal(source.Functions)
 			if err != nil {
-				return t.error(err)
+				return nil, errors.E(op, t.error(err))
 			}
-			var functionsKey interface{}
-			err = v3yaml.Unmarshal(functionsNodeBytes, metadatautil.NewYamlDecoder(
+			var functionsKey yaml.Node
+			err = yaml.Unmarshal(functionsNodeBytes, metadatautil.NewYamlDecoder(
 				metadatautil.YamlDecoderOpts{
 					IncludeTagBaseDirectory: filepath.Join(t.MetadataDir, sourcesDirectory),
 				},
 				&functionsKey,
 			))
 			if err != nil {
-				return t.error(err)
+				return nil, errors.E(op, t.error(err))
 			}
 			source.Functions = functionsKey
-		} else {
-			t.logger.Debugf("building metadata: functions node not found for %s", source.Name)
 		}
-
 		sources = append(sources, source)
 	}
 
-	sourcesStructBytes, err := goyaml.Marshal(sources)
-	if err != nil {
-		return t.error(err)
-	}
-	var item = goyaml.MapItem{
-		Key:   "sources",
-		Value: []yaml.MapSlice{},
-	}
-	if err := v3yaml.Unmarshal(sourcesStructBytes, &item.Value); err != nil {
-		return t.error(fmt.Errorf("parsing error: %w \n%v", err, string(sourcesStructBytes)))
-	}
-	*metadata = append(*metadata, item)
-	return nil
+	return map[string]interface{}{t.Key(): sources}, nil
 }
 
-func (t *SourceConfig) Export(metadata goyaml.MapSlice) (map[string][]byte, metadataobject.ErrParsingMetadataObject) {
-	metadataBytes, err := goyaml.Marshal(metadata)
+func (t *SourceConfig) Export(metadata map[string]yaml.Node) (map[string][]byte, error) {
+	var op errors.Op = "sources.SourceConfig.Export"
+	var sourcesNode yaml.Node
+	var ok bool
+	if sourcesNode, ok = metadata[t.Key()]; !ok {
+		return nil, nil
+	}
+	if sourcesNode.IsZero() {
+		t.logger.Debugf("skipping exporting %v - not found", t.Key())
+		return nil, nil
+	}
+
+	sourceBs, err := yaml.Marshal(sourcesNode)
 	if err != nil {
-		return nil, t.error(err)
+		return nil, errors.E(op, t.error(err))
 	}
 	files := map[string][]byte{}
+	var sources []Source
+	if err := yaml.Unmarshal(sourceBs, &sources); err != nil {
+		return nil, errors.E(op, t.error(err))
+	}
+
 	// Build sources.yaml
 	// sources.yaml
-	var sources []*Source
-	sourcePath, err := yaml.PathString("$.sources")
-	if err != nil {
-		return nil, t.error(err)
-	}
-	if err := sourcePath.Read(bytes.NewReader(metadataBytes), &sources); err != nil {
-		return nil, t.error(err)
-	}
 	for idx, source := range sources {
-		var tableTags []string
-		var functionTags []string
+		var tableTags []yaml.Node
+		var functionTags []yaml.Node
+		if !source.Tables.IsZero() {
 
-		// populate !include syntax
-		var tablesKey []struct {
-			Table struct {
-				Name string `yaml:"name"`
-				// Depending on the datasource the namespacing parameter can change.
-				// for example in pg and mssql the namespacing is done with the concept of schemas
-				// and in cases like bigquery it'll be called "dataset"
-				Schema  *string `yaml:"schema"`
-				Dataset *string `yaml:"dataset"`
-			} `yaml:"table"`
-		}
-		path := fmt.Sprintf("$.sources[%d].tables", idx)
-		tablesPath, err := yaml.PathString(path)
-		if err != nil {
-			return nil, t.error(err)
-		}
-		if err := tablesPath.Read(bytes.NewReader(metadataBytes), &tablesKey); err != nil {
-			t.logger.Debug("reading functions node from metadata", err)
-		}
-
-		var rawTables []yaml.MapSlice
-		if err := tablesPath.Read(bytes.NewReader(metadataBytes), &rawTables); err != nil {
-			t.logger.Debug("reading tables node from metadata", err)
-		}
-		for idx, table := range tablesKey {
-			var tableNamespaceIdentifier string
-			// according to what namespacing parameter is set w.r.t to the source
-			// return the name of the namespacing identifier
-			// for pg and mssql it'll be schema name
-			// for big query this will be dataset name
-			if table.Table.Schema != nil {
-				tableNamespaceIdentifier = *table.Table.Schema
-			} else if table.Table.Dataset != nil {
-				tableNamespaceIdentifier = *table.Table.Dataset
+			// populate !include syntax
+			var tablesKey []struct {
+				Table yaml.Node `yaml:"table"`
 			}
-
-			tableFileName := fmt.Sprintf("%s_%s.yaml", tableNamespaceIdentifier, table.Table.Name)
-			tableIncludeTag := fmt.Sprintf("%s %s", "!include", tableFileName)
-			tableTags = append(tableTags, tableIncludeTag)
-
-			// build <source>/tables/<table_primary_key>.yaml
-			b, err := yaml.Marshal(rawTables[idx])
+			tablebs, err := yaml.Marshal(source.Tables)
 			if err != nil {
-				return nil, t.error(err)
+				return nil, errors.E(op, t.error(err))
 			}
-			tableFilePath := filepath.ToSlash(filepath.Join(t.MetadataDir, sourcesDirectory, source.Name, tablesDirectory, tableFileName))
-			files[tableFilePath] = b
-		}
-		tableTagsFilePath := filepath.ToSlash(filepath.Join(t.MetadataDir, sourcesDirectory, source.Name, tablesDirectory, "tables.yaml"))
-		tableTagsBytes, err := yaml.Marshal(tableTags)
-		if err != nil {
-			return nil, t.error(fmt.Errorf("building contents for %v: %w", tableTagsFilePath, err))
-		}
-		files[tableTagsFilePath] = tableTagsBytes
-		source.Tables = fmt.Sprintf("!include %s", filepath.ToSlash(filepath.Join(source.Name, tablesDirectory, "tables.yaml")))
+			var tableNodes []yaml.Node
+			if err := yaml.Unmarshal(tablebs, &tablesKey); err != nil {
+				return nil, errors.E(op, t.error(err))
+			}
+			if err := yaml.Unmarshal(tablebs, &tableNodes); err != nil {
+				return nil, errors.E(op, t.error(err))
+			}
+			for idx, table := range tablesKey {
+				tableFileName, err := getTableYamlFileName(table.Table)
+				if err != nil {
+					return nil, errors.E(op, t.error(err))
+				}
+				tableIncludeTag := yaml.Node{
+					Kind:  yaml.ScalarNode,
+					Tag:   "!!str",
+					Style: yaml.DoubleQuotedStyle,
+					Value: fmt.Sprintf("%s %s", "!include", tableFileName),
+				}
+				tableTags = append(tableTags, tableIncludeTag)
 
-		var functions []struct {
-			Function struct {
-				Name   string `yaml:"name"`
-				Schema string `yaml:"schema"`
-			} `yaml:"function"`
+				// build <source>/tables/<table_primary_key>.yaml
+				var buf bytes.Buffer
+				if err := metadataobject.GetEncoder(&buf).Encode(tableNodes[idx]); err != nil {
+					return nil, errors.E(op, t.error(err))
+				}
+				tableFilePath := filepath.ToSlash(filepath.Join(t.MetadataDir, sourcesDirectory, source.Name, tablesDirectory, tableFileName))
+				files[tableFilePath] = buf.Bytes()
+			}
+			tableTagsFilePath := filepath.ToSlash(filepath.Join(t.MetadataDir, sourcesDirectory, source.Name, tablesDirectory, "tables.yaml"))
+			var tableTagsBytes bytes.Buffer
+			if err := metadataobject.GetEncoder(&tableTagsBytes).Encode(tableTags); err != nil {
+				return nil, errors.E(op, t.error(fmt.Errorf("building contents for %v: %w", tableTagsFilePath, err)))
+			}
+			files[tableTagsFilePath] = tableTagsBytes.Bytes()
+			sources[idx].Tables = yaml.Node{
+				Kind:  yaml.ScalarNode,
+				Tag:   "!!str",
+				Style: yaml.DoubleQuotedStyle,
+				Value: fmt.Sprintf("!include %s", filepath.ToSlash(filepath.Join(source.Name, tablesDirectory, "tables.yaml"))),
+			}
 		}
-		functionsPath, err := yaml.PathString(fmt.Sprintf("$.sources[%d].functions", idx))
-		if err != nil {
-			return nil, t.error(err)
-		}
-		if err := functionsPath.Read(bytes.NewReader(metadataBytes), &functions); err != nil {
-			t.logger.Debug("reading functions node from metadata", err)
-		}
-		var rawFunctions []yaml.MapSlice
-		if err := functionsPath.Read(bytes.NewReader(metadataBytes), &rawFunctions); err != nil {
-			t.logger.Debug("reading functions node from metadata", err)
-		}
-		for idx, function := range functions {
-			functionFileName := fmt.Sprintf("%s_%s.yaml", function.Function.Schema, function.Function.Name)
-			includeTag := fmt.Sprintf("%s %s", "!include", functionFileName)
-			functionTags = append(functionTags, includeTag)
+		// Functions are 2 types: PG and Snowflake, which differs in how naming is provided.
+		// See https://hasura.io/docs/latest/api-reference/metadata-api/custom-functions/
+		// PG:
+		// { "function": {"schema": "public", "name": "reset_widget"}, "configuration": ...}
+		// Snowflake:
+		// { "function": ["search_articles"], "configuration": ...}
 
-			// build <source>/functions/<function_primary_key>.yaml
-			b, err := yaml.Marshal(rawFunctions[idx])
+		if !source.Functions.IsZero() {
+			functionsbs, err := yaml.Marshal(source.Functions)
 			if err != nil {
-				return nil, t.error(err)
+				return nil, errors.E(op, t.error(err))
 			}
-			functionFilePath := filepath.ToSlash(filepath.Join(t.MetadataDir, sourcesDirectory, source.Name, functionsDirectory, functionFileName))
-			files[functionFilePath] = b
-		}
-		if len(functions) > 0 {
-			functionsTagsFilePath := filepath.ToSlash(filepath.Join(t.MetadataDir, sourcesDirectory, source.Name, functionsDirectory, "functions.yaml"))
-			functionTagsBytes, err := yaml.Marshal(functionTags)
-			if err != nil {
-				return nil, t.error(fmt.Errorf("building contents for %v: %w", functionsTagsFilePath, err))
+
+			var functions []struct {
+				Function yaml.Node `yaml:"function"`
 			}
-			files[functionsTagsFilePath] = functionTagsBytes
-			source.Functions = filepath.ToSlash(fmt.Sprintf("!include %s", filepath.ToSlash(filepath.Join(source.Name, functionsDirectory, "functions.yaml"))))
+			if err := yaml.Unmarshal(functionsbs, &functions); err != nil {
+				return nil, errors.E(op, t.error(err))
+			}
+
+			var functionNodes []yaml.Node
+			if err := yaml.Unmarshal(functionsbs, &functionNodes); err != nil {
+				return nil, errors.E(op, t.error(err))
+			}
+
+			for idx, functionNode := range functions {
+				var functionFileName string
+				functionbs, err := yaml.Marshal(functionNode.Function)
+				if err != nil {
+					return nil, errors.E(op, t.error(err))
+				}
+				if functionNode.Function.Kind == yaml.MappingNode { // Native DB functions
+					var function struct {
+						Name   string `yaml:"name"`
+						Schema string `yaml:"schema"`
+					}
+					if err := yaml.Unmarshal(functionbs, &function); err != nil {
+						return nil, errors.E(op, t.error(err))
+					}
+					functionFileName = fmt.Sprintf("%s_%s.yaml", function.Schema, function.Name)
+				} else { // Data Connector functions
+					var function []string
+					if err := yaml.Unmarshal(functionbs, &function); err != nil {
+						return nil, errors.E(op, t.error(err))
+					}
+					functionFileName = fmt.Sprintf("%s.yaml", strings.Join(function[:], "_"))
+				}
+
+				includeTag := yaml.Node{
+					Kind:  yaml.ScalarNode,
+					Tag:   "!!str",
+					Style: yaml.DoubleQuotedStyle,
+					Value: fmt.Sprintf("%s %s", "!include", functionFileName),
+				}
+				functionTags = append(functionTags, includeTag)
+
+				// build <source>/functions/<function_primary_key>.yaml
+				var buf bytes.Buffer
+				if err := metadataobject.GetEncoder(&buf).Encode(functionNodes[idx]); err != nil {
+					return nil, errors.E(op, t.error(err))
+				}
+				functionFilePath := filepath.ToSlash(filepath.Join(t.MetadataDir, sourcesDirectory, source.Name, functionsDirectory, functionFileName))
+				files[functionFilePath] = buf.Bytes()
+			}
+			if len(functions) > 0 {
+				functionsTagsFilePath := filepath.ToSlash(filepath.Join(t.MetadataDir, sourcesDirectory, source.Name, functionsDirectory, "functions.yaml"))
+				var functionTagsBytes bytes.Buffer
+				if err := metadataobject.GetEncoder(&functionTagsBytes).Encode(functionTags); err != nil {
+					return nil, errors.E(op, t.error(fmt.Errorf("building contents for %v: %w", functionsTagsFilePath, err)))
+				}
+				files[functionsTagsFilePath] = functionTagsBytes.Bytes()
+				sources[idx].Functions = yaml.Node{
+					Kind:  yaml.ScalarNode,
+					Tag:   "!!str",
+					Style: yaml.DoubleQuotedStyle,
+					Value: filepath.ToSlash(fmt.Sprintf("!include %s", filepath.ToSlash(filepath.Join(source.Name, functionsDirectory, "functions.yaml")))),
+				}
+			}
 		}
 	}
-
-	sourcesYamlBytes, err := yaml.Marshal(sources)
-	if err != nil {
-		return nil, t.error(err)
+	var buf bytes.Buffer
+	if err := metadataobject.GetEncoder(&buf).Encode(sources); err != nil {
+		return nil, errors.E(op, t.error(err))
 	}
-	files[filepath.ToSlash(filepath.Join(t.MetadataDir, sourcesDirectory, t.Filename()))] = sourcesYamlBytes
+	files[filepath.ToSlash(filepath.Join(t.MetadataDir, sourcesDirectory, t.Filename()))] = buf.Bytes()
 	return files, nil
 }
 
-func (t *SourceConfig) GetFiles() ([]string, metadataobject.ErrParsingMetadataObject) {
+func (t *SourceConfig) GetFiles() ([]string, error) {
+	var op errors.Op = "sources.SourceConfig.GetFiles"
 	rootFile := filepath.Join(t.MetadataDir, sourcesDirectory, t.Filename())
 	files, err := metadataobject.DefaultGetFiles(rootFile)
 	if err != nil {
-		return nil, t.error(err)
+		return nil, errors.E(op, t.error(err))
 	}
 	return files, nil
 }
 
 func (t *SourceConfig) Key() string {
-	return "sources"
+	return metadataobject.SourcesKey
 }
 
 func (t *SourceConfig) Filename() string {
@@ -303,11 +320,12 @@ func (t *SourceConfig) BaseDirectory() string {
 	return t.MetadataDir
 }
 
-func (t *SourceConfig) WriteDiff(opts metadataobject.WriteDiffOpts) metadataobject.ErrParsingMetadataObject {
+func (t *SourceConfig) WriteDiff(opts metadataobject.WriteDiffOpts) error {
+	var op errors.Op = "sources.SourceConfig.WriteDiff"
 	excludePatterns := []string{"tables/tables.yaml", "functions/functions.yaml"}
 	err := metadataobject.DefaultWriteDiff(metadataobject.DefaultWriteDiffOpts{From: t, WriteDiffOpts: opts, ExcludeFilesPatterns: excludePatterns})
 	if err != nil {
-		return t.error(err)
+		return errors.E(op, t.error(err))
 	}
 	return nil
 }

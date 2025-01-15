@@ -1,22 +1,21 @@
-{-# LANGUAGE NumericUnderscores #-}
-
 module Hasura.Backends.BigQuery.Connection
   ( BigQueryProblem,
     resolveConfigurationInput,
     resolveConfigurationInputs,
     resolveConfigurationJson,
+    initConnection,
     runBigQuery,
   )
 where
 
 import Control.Concurrent.MVar
 import Control.Exception
+import Control.Retry qualified as Retry
 import Crypto.Hash.Algorithms (SHA256 (..))
 import Crypto.PubKey.RSA.PKCS15 (signSafer)
 import Crypto.PubKey.RSA.Types as Cry (Error)
 import Data.Aeson qualified as J
 import Data.Aeson.Casing qualified as J
-import Data.Aeson.TH qualified as J
 import Data.ByteArray.Encoding qualified as BAE
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
@@ -31,6 +30,7 @@ import Hasura.Backends.BigQuery.Source
 import Hasura.Backends.MSSQL.Connection qualified as MSSQLConn (getEnv)
 import Hasura.Base.Error
 import Hasura.Prelude
+import Network.HTTP.Client
 import Network.HTTP.Simple
 import Network.HTTP.Types
 
@@ -38,12 +38,17 @@ newtype Scope = Scope {unScope :: T.Text}
   deriving (Show, Eq, IsString)
 
 data GoogleAccessTokenRequest = GoogleAccessTokenRequest
-  { _gatrGrantType :: !Text,
-    _gatrAssertion :: !Text
+  { _gatrGrantType :: Text,
+    _gatrAssertion :: Text
   }
-  deriving (Show, Eq)
+  deriving (Show, Generic, Eq)
 
-$(J.deriveJSON (J.aesonDrop 5 J.snakeCase) {J.omitNothingFields = False} ''GoogleAccessTokenRequest)
+instance J.FromJSON GoogleAccessTokenRequest where
+  parseJSON = J.genericParseJSON (J.aesonDrop 5 J.snakeCase) {J.omitNothingFields = False}
+
+instance J.ToJSON GoogleAccessTokenRequest where
+  toJSON = J.genericToJSON (J.aesonDrop 5 J.snakeCase) {J.omitNothingFields = False}
+  toEncoding = J.genericToEncoding (J.aesonDrop 5 J.snakeCase) {J.omitNothingFields = False}
 
 mkTokenRequest :: Text -> GoogleAccessTokenRequest
 mkTokenRequest = GoogleAccessTokenRequest "urn:ietf:params:oauth:grant-type:jwt-bearer"
@@ -53,9 +58,14 @@ data TokenProblem
   | BearerTokenSignsaferProblem Cry.Error
   | TokenFetchProblem JSONException
   | TokenRequestNonOK Status
-  deriving (Show)
+  deriving (Show, Generic)
 
-instance Exception TokenProblem
+tokenProblemMessage :: TokenProblem -> Text
+tokenProblemMessage = \case
+  BearerTokenDecodeProblem _ -> "Cannot decode bearer token"
+  BearerTokenSignsaferProblem _ -> "Cannot sign bearer token"
+  TokenFetchProblem _ -> "JSON exception occurred while fetching token"
+  TokenRequestNonOK status -> "HTTP request to fetch token failed with status " <> tshow status
 
 data ServiceAccountProblem
   = ServiceAccountFileDecodeProblem String
@@ -77,7 +87,7 @@ resolveConfigurationJson env = \case
       Right sa -> pure . Right $ sa
 
 resolveConfigurationInput ::
-  QErrM m =>
+  (QErrM m) =>
   Env.Environment ->
   ConfigurationInput ->
   m Text
@@ -86,7 +96,7 @@ resolveConfigurationInput env = \case
   FromEnv v -> MSSQLConn.getEnv env v
 
 resolveConfigurationInputs ::
-  QErrM m =>
+  (QErrM m) =>
   Env.Environment ->
   ConfigurationInputs ->
   m [Text]
@@ -94,7 +104,12 @@ resolveConfigurationInputs env = \case
   FromYamls a -> pure a
   FromEnvs v -> filter (not . T.null) . T.splitOn "," <$> MSSQLConn.getEnv env v
 
-getAccessToken :: MonadIO m => ServiceAccount -> m (Either TokenProblem TokenResp)
+initConnection :: (MonadIO m) => ServiceAccount -> BigQueryProjectId -> Maybe RetryOptions -> m BigQueryConnection
+initConnection _bqServiceAccount _bqProjectId _bqRetryOptions = do
+  _bqAccessTokenMVar <- liftIO $ newMVar Nothing -- `runBigQuery` initializes the token
+  pure BigQueryConnection {..}
+
+getAccessToken :: (MonadIO m) => ServiceAccount -> m (Either TokenProblem TokenResp)
 getAccessToken sa = do
   eJwt <- encodeBearerJWT sa ["https://www.googleapis.com/auth/cloud-platform"]
   case eJwt of
@@ -104,9 +119,9 @@ getAccessToken sa = do
         Left unicodeEx -> pure . Left . BearerTokenDecodeProblem $ unicodeEx
         Right assertion -> do
           tokenFetchResponse :: Response (Either JSONException TokenResp) <-
-            httpJSONEither $
-              setRequestBodyJSON (mkTokenRequest assertion) $
-                parseRequest_ ("POST " <> tokenURL)
+            httpJSONEither
+              $ setRequestBodyJSON (mkTokenRequest assertion)
+              $ parseRequest_ ("POST " <> tokenURL)
           if getResponseStatusCode tokenFetchResponse /= 200
             then pure . Left . TokenRequestNonOK . getResponseStatus $ tokenFetchResponse
             else case getResponseBody tokenFetchResponse of
@@ -147,14 +162,14 @@ getAccessToken sa = do
         mkSigInput n = header <> "." <> payload
           where
             header =
-              b64EncodeJ $
-                J.object
+              b64EncodeJ
+                $ J.object
                   [ "alg" J..= ("RS256" :: T.Text),
                     "typ" J..= ("JWT" :: T.Text)
                   ]
             payload =
-              b64EncodeJ $
-                J.object
+              b64EncodeJ
+                $ J.object
                   [ "aud" J..= tokenURL,
                     "scope" J..= T.intercalate " " (map unScope scopes),
                     "iat" J..= n,
@@ -163,13 +178,14 @@ getAccessToken sa = do
                   ]
 
 -- | Get a usable token. If the token has expired refresh it.
-getUsableToken :: MonadIO m => BigQuerySourceConfig -> m (Either TokenProblem TokenResp)
-getUsableToken BigQuerySourceConfig {_scServiceAccount, _scAccessTokenMVar} =
-  liftIO $
-    modifyMVar _scAccessTokenMVar $ \mTokenResp -> do
+getUsableToken :: (MonadIO m) => BigQueryConnection -> m (Either TokenProblem TokenResp)
+getUsableToken BigQueryConnection {_bqServiceAccount, _bqAccessTokenMVar} =
+  liftIO
+    $ modifyMVar _bqAccessTokenMVar
+    $ \mTokenResp -> do
       case mTokenResp of
         Nothing -> do
-          refreshedToken <- getAccessToken _scServiceAccount
+          refreshedToken <- getAccessToken _bqServiceAccount
           case refreshedToken of
             Left e -> pure (Nothing, Left e)
             Right t -> pure (Just t, Right t)
@@ -177,7 +193,7 @@ getUsableToken BigQuerySourceConfig {_scServiceAccount, _scAccessTokenMVar} =
           pt <- liftIO $ getPOSIXTime
           if (pt >= fromIntegral _trExpiresAt - (10 :: NominalDiffTime)) -- when posix-time is greater than expires-at-minus-threshold
             then do
-              refreshedToken' <- getAccessToken _scServiceAccount
+              refreshedToken' <- getAccessToken _bqServiceAccount
               case refreshedToken' of
                 Left e -> pure (Just t, Left e)
                 Right t' -> pure (Just t', Right t')
@@ -185,18 +201,37 @@ getUsableToken BigQuerySourceConfig {_scServiceAccount, _scAccessTokenMVar} =
 
 data BigQueryProblem
   = TokenProblem TokenProblem
-  deriving (Show)
+  deriving (Show, Generic)
+
+instance J.ToJSON BigQueryProblem where
+  toJSON (TokenProblem tokenProblem) =
+    J.object ["token_problem" J..= tokenProblemMessage tokenProblem]
 
 runBigQuery ::
   (MonadIO m) =>
-  BigQuerySourceConfig ->
+  BigQueryConnection ->
   Request ->
   m (Either BigQueryProblem (Response BL.ByteString))
-runBigQuery sc req = do
-  eToken <- getUsableToken sc
+runBigQuery conn req = do
+  eToken <- getUsableToken conn
   case eToken of
     Left e -> pure . Left . TokenProblem $ e
     Right TokenResp {_trAccessToken, _trExpiresAt} -> do
       let req' = setRequestHeader "Authorization" ["Bearer " <> (TE.encodeUtf8 . coerce) _trAccessToken] req
       -- TODO: Make this catch the HTTP exceptions
-      Right <$> httpLBS req'
+      Right <$> case _bqRetryOptions conn of
+        Just opts -> withGoogleApiRetries opts (httpLBS req')
+        Nothing -> httpLBS req'
+
+-- | Uses up to specified number retries for Google API requests with the specified base delay, uses full jitter backoff,
+-- see https://aws.amazon.com/ru/blogs/architecture/exponential-backoff-and-jitter/
+-- HTTP statuses for transient errors were taken from
+-- https://github.com/googleapis/python-api-core/blob/34ebdcc251d4f3d7d496e8e0b78847645a06650b/google/api_core/retry.py#L112-L115
+withGoogleApiRetries :: (MonadIO m) => RetryOptions -> m (Response body) -> m (Response body)
+withGoogleApiRetries RetryOptions {..} action =
+  Retry.retrying retryPolicy checkStatus (const action)
+  where
+    baseDelay = fromInteger . diffTimeToMicroSeconds $ microseconds _retryBaseDelay
+    retryPolicy = Retry.fullJitterBackoff baseDelay <> Retry.limitRetries _retryNumRetries
+    checkStatus _ resp =
+      pure $ responseStatus resp `elem` [tooManyRequests429, internalServerError500, serviceUnavailable503]

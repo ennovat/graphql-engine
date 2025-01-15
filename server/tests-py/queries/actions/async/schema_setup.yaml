@@ -49,7 +49,7 @@ args:
       - name: name
         type: String!
       output_type: UserId
-      handler: http://127.0.0.1:5593/create-user
+      handler: "{{ACTION_WEBHOOK_HANDLER}}/create-user"
 
 - type: create_action_permission
   args:
@@ -70,16 +70,19 @@ args:
       - name: name
         type: String!
       output_type: UserId
-      handler: http://127.0.0.1:5593/create-user
+      handler: "{{ACTION_WEBHOOK_HANDLER}}/create-user"
       request_transform:
+        version: 2
         template_engine: Kriti
-        body: |
-          {
-            "input": {
-              "email": "foo@bar.com",
-              "name": "notClarke"
+        body:
+          action: transform
+          template: |
+            {
+              "input": {
+                "email": "foo@bar.com",
+                "name": "notClarke"
+              }
             }
-          }
 
 - type: create_action
   args:
@@ -92,4 +95,20 @@ args:
       - name: name
         type: String!
       output_type: UserIdNested
-      handler: http://127.0.0.1:5593/create-user-nested
+      handler: "{{ACTION_WEBHOOK_HANDLER}}/create-user-nested"
+
+- type: create_action
+  args:
+    name: test_async_action_error_response
+    definition:
+      kind: asynchronous
+      output_type: UserId
+      handler: "{{ACTION_WEBHOOK_HANDLER}}/test-action-user-role-async"
+
+- type: create_action_permission
+  args:
+    action: test_async_action_error_response
+    role: user
+    definition:
+      select:
+        filter: {}

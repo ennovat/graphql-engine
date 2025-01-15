@@ -1,31 +1,1673 @@
 # Hasura GraphQL Engine Changelog
 
-## Next release
-(Add highlights/major features below)
+:warning: This file is deprecated and contains changelog only for older releases. Please visit [this page](https://hasura.io/changelog) or [the github releases page](https://github.com/hasura/graphql-engine/releases) to view the changelog for latest releases :warning:
 
+## v2.10.1
+
+### Bug fixes and improvements
+
+- server: fix long identifiers in insert with parameters (fix #8741)
+- server: fix 'nulls: first' and 'nulls: last' parsing for Postgres
+- server: accept `extensions_schema` while adding a PostgreSQL source for the graphql-engine to install database extensions in the specified schema
+- server: accept a default extensions schema (`HASURA_GRAPHQL_METADATA_DATABASE_EXTENSIONS_SCHEMA`) for the metadata database where graphql-engine will install database extensions
+- console: add support extensions_schema on postgres connect/edit DB form
+
+## v2.11.0-beta.1
+
+### Bug fixes and improvements
+
+- server: accept `extensions_schema` while adding a PostgreSQL source for the graphql-engine to install database extensions in the specified schema
+- server: accept a default extensions schema (`HASURA_GRAPHQL_METADATA_DATABASE_EXTENSIONS_SCHEMA`) for the metadata database where graphql-engine will install database extensions
+- server: add warning log for missing admin secret
+- server: fix querying relationships defined using multiple columns on BigQuery
+- server: fix 'nulls: first' and 'nulls: last' parsing for Postgres
+- console: add custom names for streaming subscriptions
+- console: add support for table query and subscription root fields visibility permissions
+- console: fix the BigQuery row-level restrictions on boolean columns
+- console: add support extensions_schema on postgres connect/edit DB form
+- console: add support for new database-to-remote schema metadata format in old table relationships UI
+
+## v2.10.0
+
+### Introducing Apollo Federation v1 support (experimental)
+
+HGE can now be used as a subgraph in an Apollo federated GraphQL server.
+You can read more about this feature in the [docs](https://hasura.io/docs/latest/data-federation/apollo-federation/).
+
+This is an experimental feature (can be enabled by setting
+`HASURA_GRAPHQL_EXPERIMENTAL_FEATURES: apollo_federation`). This is supported
+over all databases. To expose a table in an Apollo federated gateway, we need
+to enable Apollo federation in its metadata. This can be done via the
+`*_track_table` metadata API or via Modify Table page in console.
+
+Enabling Apollo Federation on a table would add the `@key` directive in the GraphQL schema with
+fields argument set to the primary key of the table (say `id`), i.e:
+```graphql
+type user @key(fields: "id") {
+  id: Int!
+  name: String
+  ...
+}
+```
+
+### Behaviour changes
+
+- server: When providing a JSON path in a JWT claims map, you can now use
+  double-quotes as well as single-quotes. Escaped characters in strings will now
+  be honored appropriately, in the same way as JSON.
+
+- server: In certain error messages, JSON paths will use double-quotes instead
+  of single-quotes to represent field access.
+
+  For example, instead of `$.args['$set']`, you will see `$.args["$set"]`.
+
+- cli: Use 2-spaces indent for GraphQL content in metadata instead of tabs (#8469)
+
+  Example:
+  <table>
+  <thead>
+    <tr>
+      <th>Old Behaviour<pre>metadata/query_collections.yml</pre></th>
+      <th>New Behaviour<pre>metadata/query_collections.yml</pre></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><pre>
+  - name: allowed-queries
+    definition:
+      queries:
+      - name: getAlbums
+        query: |
+        	query getAlbums {
+        		albums {
+        			id
+        			title
+        		}
+        	}
+      </pre></td>
+      <td><pre>
+  - name: allowed-queries
+    definition:
+      queries:
+      - name: getAlbums
+        query: |
+          query getAlbums {
+            albums {
+              id
+              title
+            }
+          }
+      </pre></td>
+    </tr>
+  </tbody>
+  </table>
+
+### Update multiple records for Postgres
+
+We are introducing a new way to allow updating multiple records in the same
+transaction for Postgres sources (#2768).
+
+For example, the following query can be used to run the equivalent of two
+`update_by_pk` in a single transaction:
+
+```graphql
+update_artist_many(
+  updates: [
+    { where: { id: { _eq: 1 } },
+      _set: { name: "new name", description: "other" }
+    }
+    { where: { id: { _eq: 2 } },
+      _set: { name: "new name" }
+    }
+    ]
+) {
+  affected_rows
+  returning {
+    name
+  }
+}
+```
+
+However, this feature allows arbitrary updates, even when they overlap:
+
+
+```graphql
+update_artist_many(
+  updates: [
+    { where: { id: { _lte: 3 } },
+      _set: { name: "first", description: "other" }
+    }
+    { where: { id: { _eq: 2 } },
+      _set: { name: "second" }
+    }
+    { where: { id: { _gt: 2 } },
+      _set: { name: "third", description: "hello" }
+    }
+    { where: { id: { _eq: 1 } },
+      _set: { name: "done" }
+    }
+    ]
+) {
+  affected_rows
+  returning {
+    id
+    name
+  }
+}
+```
+
+Given the table looked like this before the query:
+
+id | name | description
+-- | ---- | -----------
+ 1 | one  | d1
+ 2 | two  | d2
+ 3 | three | d3
+ 4 | four | d4
+
+After executing the query, the table will look like:
+
+id | name | description
+-- | ---- | -----------
+ 1 | done  | other
+ 2 | second  | other
+ 3 | third | hello
+ 4 | third | hello
+
+The returned data will look like this:
+
+```json
+{
+  "data": {
+    "update_artist_many": [
+      {
+        "affected_rows": 3,
+        "returning": [
+          {
+            "id": 1,
+            "name": "first"
+          },
+          {
+            "id": 2,
+            "name": "first"
+          },
+          {
+            "id": 3,
+            "name": "first"
+          }
+        ]
+      },
+      {
+        "affected_rows": 1,
+        "returning": [
+          {
+            "id": 2,
+            "name": "second"
+          }
+        ]
+      },
+      {
+        "affected_rows": 2,
+        "returning": [
+          {
+            "id": 3,
+            "name": "third"
+          },
+          {
+            "id": 4,
+            "name": "third"
+          }
+        ]
+      },
+      {
+        "affected_rows": 1,
+        "returning": [
+          {
+            "id": 1,
+            "name": "done"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The way it works is:
+- we allow arbitrary `where` clauses (just like in a regular `update`)
+- we allow arbitrary `update`s (`_set`, `_inc`, etc., depending on the field
+    type)
+- we run each update in sequence, in a transaction (if one of them fails,
+    everything is rolled back)
+- we collect the return value of each query and return a list of results
+
+Please submit any feedback you may have for this feature at https://github.com/hasura/graphql-engine/issues/2768.
+
+### Error message syntax
+
+We are slowly standardizing the format of error messages, especially with regards to the way values are quoted.
+
+Any errors generated during the parsing of GraphQL or the construction of the schema might have changed the way they quote certain values. For example, GraphQL names are now always quoted with single quotes, leading to changes such as the following.
+
+_Before:_
+
+```
+field "nonexistent_root_field" not found in type: 'query_root'
+```
+
+_After:_
+
+```
+field 'nonexistent_root_field' not found in type: 'query_root'
+```
+
+If you are depending on the specific text of an error message and/or parsing the message, you may need to update your code accordingly.
+
+Further changes are forthcoming along similar lines.
+
+### Bug fixes and improvements
+
+- server: Kriti `basicFunctions` now available for REST Connectors and Webhook Transforms
+- server: Fix bug where Hasura SQL trigger was not dropped when MS SQL Server source is dropped
+- server: Delete event trigger related database SQL triggers from tables when they are untracked
+- server: Use `root_field_namespace` as prefix for remote schema (fix #8438)
+- server: Fix prefix/suffix behaviour for `graphql-default` naming convention (fix #8544)
+- server: Fix namespace visibility during introspection (fix #8434)
+- server: Create missing SQL triggers, if any, while reloading metadata and startup.
+- server: Fix name/enum transformation bugs in `graphql-default` naming convention (fix #8640)
+- server: Parameterize array variables in generated SQL for queries and subscriptions
+- server: Make postgres-client-cert fields: `sslcert`, `sslkey` and `sslpassword` optional
+- server: Add `*_update_source` API to update configuration of a connected database (See [docs](https://hasura.io/docs/latest/graphql/core/api-reference/metadata-api/source/))
+- server: Changes to the Rest Endpoints OpenAPI specification:
+    - The nullability of items in the output is now always correctly reported
+    - Scalars other than UUID are more consistently inlined
+    - Objects now have a title and, when available, the same description as in the GraphQL schema
+- server: Bump Kriti package version to support optional variable lookup in string interpolation (fix #8574)
+- server: Generate unique intermediate column names in PostgreSQL SQL queries to workaround PostgreSQL's identifier length limitation (fix #3796)
+- console: Hide TimescaleDB internal schemas from data tab for connected TimescaleDB databases
+- console: Support naming convention in source customization for PostgreSQL DBs
+- console: Fix bug where "Analyze" button in the API explorer would stay in analyzing state after analyze failed
+- console: Fix missing remote database relationship info for databases other than default on new table relationships page
+- build: Changes to the `hasura/graphql-engine` Docker image:
+  - Default graphql-engine docker images (`hasura/graphql-engine:<VERSION>`) now use an Ubuntu base instead of Debian.
+  - Debian flavour of images (`hasura/graphql-engine:<VERSION>.debian`) are still published to Docker Hub.
+
+## v2.10.0-beta.1
+
+### Introducing Apollo Federation v1 support (experimental)
+
+HGE can now be used as a subgraph in an Apollo federated GraphQL server.
+You can read more about this feature in [the RFC](https://github.com/hasura/graphql-engine/blob/master/rfcs/apollo-federation.md).
+
+This is an experimental feature (can be enabled by setting
+`HASURA_GRAPHQL_EXPERIMENTAL_FEATURES: apollo_federation`). This is supported
+over all databases. To expose a table in an Apollo federated gateway, we need
+to enable Apollo federation in its metadata. This can be done via the
+`*_track_table` metadata API and console support will be added soon.
+
+For example, given a table called `user` in a database which is not being
+tracked by Hasura, we can run `*_track_table` to enable Apollo federation for
+the table:
+
+```
+POST /v1/metadata HTTP/1.1
+Content-Type: application/json
+X-Hasura-Role: admin
+```
+``` json
+{
+  "type": "pg_track_table",
+  "args": {
+    "table": "user",
+    "schema": "public",
+    "apollo_federation_config": {
+        "enable": "v1"
+    }
+  }
+}
+```
+The above API call would add the `@key` directive in the GraphQL schema with
+fields argument set to the primary key of the table (say `id`), i.e:
+```graphql
+type user @key(fields: "id") {
+  id: Int!
+  name: String
+  ...
+}
+```
+
+### Behaviour changes
+
+- server: When providing a JSON path in a JWT claims map, you can now use
+  double-quotes as well as single-quotes. Escaped characters in strings will now
+  be honored appropriately, in the same way as JSON.
+
+- server: In certain error messages, JSON paths will use double-quotes instead
+  of single-quotes to represent field access.
+
+  For example, instead of `$.args['$set']`, you will see `$.args["$set"]`.
+
+- cli: Use 2-spaces indent for GraphQL content in metadata instead of tabs (#8469)
+
+  Example:
+  <table>
+  <thead>
+    <tr>
+      <th>Old Behaviour<pre>metadata/query_collections.yml</pre></th>
+      <th>New Behaviour<pre>metadata/query_collections.yml</pre></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><pre>
+  - name: allowed-queries
+    definition:
+      queries:
+      - name: getAlbums
+        query: |
+        	query getAlbums {
+        		albums {
+        			id
+        			title
+        		}
+        	}
+      </pre></td>
+      <td><pre>
+  - name: allowed-queries
+    definition:
+      queries:
+      - name: getAlbums
+        query: |
+          query getAlbums {
+            albums {
+              id
+              title
+            }
+          }
+      </pre></td>
+    </tr>
+  </tbody>
+  </table>
+
+### Update multiple records for Postgres
+
+We are introducing a new way to allow updating multiple records in the same
+transaction for Postgres sources (#2768).
+
+For example, the following query can be used to run the equivalent of two
+`update_by_pk` in a single transaction:
+
+```graphql
+update_artist_many(
+  updates: [
+    { where: { id: { _eq: 1 } },
+      _set: { name: "new name", description: "other" }
+    }
+    { where: { id: { _eq: 2 } },
+      _set: { name: "new name" }
+    }
+    ]
+) {
+  affected_rows
+  returning {
+    name
+  }
+}
+```
+
+However, this feature allows arbitrary updates, even when they overlap:
+
+
+```graphql
+update_artist_many(
+  updates: [
+    { where: { id: { _lte: 3 } },
+      _set: { name: "first", description: "other" }
+    }
+    { where: { id: { _eq: 2 } },
+      _set: { name: "second" }
+    }
+    { where: { id: { _gt: 2 } },
+      _set: { name: "third", description: "hello" }
+    }
+    { where: { id: { _eq: 1 } },
+      _set: { name: "done" }
+    }
+    ]
+) {
+  affected_rows
+  returning {
+    id
+    name
+  }
+}
+```
+
+Given the table looked like this before the query:
+
+id | name | description
+-- | ---- | -----------
+ 1 | one  | d1
+ 2 | two  | d2
+ 3 | three | d3
+ 4 | four | d4
+
+After executing the query, the table will look like:
+
+id | name | description
+-- | ---- | -----------
+ 1 | done  | other
+ 2 | second  | other
+ 3 | third | hello
+ 4 | third | hello
+
+The returned data will look like this:
+
+```json
+{
+  "data": {
+    "update_artist_many": [
+      {
+        "affected_rows": 3,
+        "returning": [
+          {
+            "id": 1,
+            "name": "first"
+          },
+          {
+            "id": 2,
+            "name": "first"
+          },
+          {
+            "id": 3,
+            "name": "first"
+          }
+        ]
+      },
+      {
+        "affected_rows": 1,
+        "returning": [
+          {
+            "id": 2,
+            "name": "second"
+          }
+        ]
+      },
+      {
+        "affected_rows": 2,
+        "returning": [
+          {
+            "id": 3,
+            "name": "third"
+          },
+          {
+            "id": 4,
+            "name": "third"
+          }
+        ]
+      },
+      {
+        "affected_rows": 1,
+        "returning": [
+          {
+            "id": 1,
+            "name": "done"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The way it works is:
+- we allow arbitrary `where` clauses (just like in a regular `update`)
+- we allow arbitrary `update`s (`_set`, `_inc`, etc., depending on the field
+    type)
+- we run each update in sequence, in a transaction (if one of them fails,
+    everything is rolled back)
+- we collect the return value of each query and return a list of results
+
+Please submit any feedback you may have for this feature at https://github.com/hasura/graphql-engine/issues/2768.
+
+### Bug fixes and improvements
+
+
+- server: Kriti `basicFunctions` now available for REST Connectors and Webhook Transforms
+- server: Fix bug where Hasura SQL trigger was not dropped when MS SQL Server source is dropped
+- server: Delete event trigger related database SQL triggers from tables when they are untracked
+- server: Use `root_field_namespace` as prefix for remote schema (fix #8438)
+- server: Fix prefix/suffix behaviour for `graphql-default` naming convention (fix #8544)
+- server: Fix namespace visibility during introspection (fix #8434)
+- server: Create missing SQL triggers, if any, while reloading metadata and startup.
+- server: Fix name/enum transformation bugs in `graphql-default` naming convention (fix #8640)
+- server: Parameterize array variables in generated SQL for queries and subscriptions
+- server: Make postgres-client-cert fields: `sslcert`, `sslkey` and `sslpassword` optional
+- server: Add `*_update_source` API to update configuration of a connected database (See [docs](https://hasura.io/docs/latest/graphql/core/api-reference/metadata-api/source/))
+- server: Changes to the Rest Endpoints OpenAPI specification:
+    - The nullability of items in the output is now always correctly reported
+    - Scalars other than UUID are more consistently inlined
+    - Objects now have a title and, when available, the same description as in the GraphQL schema
+- server: Bump Kriti package version to support optional variable lookup in string interpolation (fix #8574)
+- server: Generate unique intermediate column names in PostgreSQL SQL queries to workaround PostgreSQL's identifier length limitation (fix #3796)
+- console: Hide TimescaleDB internal schemas from data tab for connected TimescaleDB databases
+- console: Support naming convention in source customization for PostgreSQL DBs
+- console: Fix bug where "Analyze" button in the API explorer would stay in analyzing state after analyze failed
+- console: Fix missing remote database relationship info for databases other than default on new table relationships page
+- build: Changes to the `hasura/graphql-engine` Docker image:
+  - Default graphql-engine docker images (`hasura/graphql-engine:<VERSION>`) now use an Ubuntu base instead of Debian.
+  - Debian flavour of images (`hasura/graphql-engine:<VERSION>.debian`) are still published to Docker Hub.
+  - CentOS flavour of images (`hasura/graphql-engine:<VERSION>.centos`) are no longer supported.
+- docs: Kriti templating documentation sections added
+  
+## v2.9.0
+
+### Event Triggers for MS SQL Server
+
+(closes https://github.com/hasura/graphql-engine/issues/7228)
+
+Event Triggers support has been added for MS SQL Server. Now, you can invoke external webhooks on insert/update/delete events on your MS SQL Server tables. See the [docs](https://hasura.io/docs/latest/graphql/core/event-triggers/index/) for more details.
+
+### Bug fixes and improvements
+
+- server: Support limit in BigQuery computed fields (fix #8562)
+- server: Improve GraphQL query parsing time and per-query memory allocation
+- server: Fix dropping column from a table that has update permissions (fix #8415)
+- server: Fix `unsupported/unknown datatype was returned` error thrown when using `mssql_redeliver_event` API
+- server: Fix bug with MS SQL Server events and shutdown handler
+- server: Fix bug where Hasura SQL trigger was not dropped when an MS SQL Server database is dropped
+- server: Allow all argument types for BigQuery routines
+- console: Add support for computed fields with session arg in permission builder (fix #8321)
+- console: Add GraphQL field customization for new database connections (root fields namespace, prefix, and suffix, and type names prefix and suffix)
+- console: Fix notifications not being shown in certain cases on the console on Hasura Cloud
+- console: Allow schemas prefixed with `pg`, but not `pg_` (fix #8435)
+- console: Introduce new table relationships UI in alpha
+- cli: Fix error reporting in `metadata apply` command (#8280)
+
+## v2.9.0-beta.3
+
+### Bug fixes and improvements
+
+- server: Fix bug where Hasura SQL trigger was not dropped when an MS SQL Server database is dropped
+- server: Allow all argument types for BigQuery routines
+- console: Fix notifications not being shown in certain cases on the console on Hasura Cloud
+
+## v2.9.0-beta.2
+
+### Bug fixes and improvements
+
+- server: fix dropping column from a table that has update permissions (fix #8415)
+- server: fix `unsupported/unknown datatype was returned` error thrown when using `mssql_redeliver_event` API
+- server: fix bug with MSSQL events and shutdown handler
+
+## v2.8.4
+
+### Bug fixes and improvements
+
+- server: Add support to customize the root field for streaming subscriptions (fixes #8618)
+
+## v2.8.3
+
+### Bug fixes and improvements
+
+- cli: fix performance regression with large metadata in `metadata apply`
+
+  During the execution of `metadata apply` command, the YAML metadata is
+  converted into JSON format because the server API accepts metadata in JSON
+  format. For large metadata(> ~20k LOC), due to a recent change this conversion was
+  taking upwards of 2 minutes of time, increasing exponentially with metadata size.
+  With the changes in this release, the performance regression has been fixed.
+  Following is a benchmark comparison of time taken for YAML to JSON conversion
+  before and after the changes for different metadata sizes:
+  | Metadata size(LOC) | Before(seconds) | After(seconds) |
+  |--------------------|-----------------|----------------|
+  |       10k          |      8.7        |     0.22       |
+  |       20k          |     15.9        |     0.29       |
+  |       50k          |     89.5        |     0.52       |
+  |      100k          |    271.9        |     0.81       |
+  |      300k          |      -          |     2.3        |
+
+
+## v2.8.2
+
+### Bug fixes and improvements
+
+- server: revert allow casting most postgres scalar types to strings in comparison expressions (#8617)
+
+## v2.9.0-beta.1
+
+### Event Triggers for MS SQL Server
+
+(closes https://github.com/hasura/graphql-engine/issues/7228)
+Event Triggers support has been added for MS SQL Server. Now, you can invoke external webhooks on insert/update/delete events on your MS SQL Server tables. See the [docs](https://hasura.io/docs/latest/graphql/core/event-triggers/index/) for more details.
+
+### Bug fixes and improvements
+
+- server: add `*_update_source` API and modify behaviour of `*_add_source` API (See [docs](https://hasura.io/docs/latest/graphql/core/api-reference/metadata-api/source/) )
+- server: support limit in BigQuery computed fields (fix #8562)
+- server: improve GraphQL query parsing time and per-query memory allocation
+- server: parameterize array variables in queries and subscriptions
+- console: allow schemas prefixed with `pg`, but not `pg_` (fix #8435)
+- console: add support for computed fields with session arg in permission builder (fix #8321)
+- console: add GraphQL field customization for new database connections (root fields namespace, prefix, and suffix, and type names prefix and suffix)
+- console: introduce new table relationships UI in alpha
+- cli: fix performance regression with large metadata in `metadata apply`
+- cli: fix error reporting in `metadata apply` command (#8280)
+- server: query runtime performance optimizations
+- server: fix bug that had disabled expression-based indexes in Postgress variants (fix Zendesk 5146)
+- server: add optionality to additional postgres-client-cert fields: sslcert, sslkey and sslpassword
+
+## v2.8.1
+
+### Bug fixes and improvements
+
+- server: fix bug that had disabled expression-based indexes in Postgres variants (fix #8601)
+
+## v2.8.0
+
+### Disabling query/subscription root fields
+
+When a table is tracked in graphql-engine, three root fields are generated automatically
+namely `<table>`, `<table>_by_pk` and `<table>_aggregate` in the `query` and the `subscription`
+root. You can now control which root fields are exposed for a given role by specifying them in the select permission.
+
+The main use-case for this feature is to disable APIs that access the table directly but which still need to be tracked so that:
+
+1. It can be accessed via a relationship to another table
+2. It can be used in select permissions for another table via a relationship
+
+For such use-cases, we can disable all the root fields of the given table. This can be done by setting the select permission as follows:
+
+```json
+{
+   "role": "user",
+   "permission": {
+     "columns": [
+       "id",
+       "name"
+     ],
+     "filter": {},
+     "allow_aggregations": true,
+     "query_root_fields": [],
+     "subscription_root_fields": []
+   }
+ }
+```
+
+Another use-case is to allow a role to directly access a table only
+if it has access to the primary key value. This can be done by setting the select permission as follows:
+
+```json
+{
+   "role": "user",
+   "permission": {
+     "columns": [
+       "id",
+       "name"
+     ],
+     "filter": {},
+     "allow_aggregations": false,
+     "query_root_fields": ["select_by_pk"],
+     "subscription_root_fields": ["select_by_pk"]
+   }
+ }
+```
+
+Note that console support for this permission will be released later.
+
+
+### Introducing naming conventions (experimental)
+
+Now, users can specify the naming convention of the auto-generated names in the HGE.
+This is an experimental feature (enabled by setting `HASURA_GRAPHQL_EXPERIMENTAL_FEATURES: naming_convention`) and is supported for postgres databases only for now. There are two naming
+conventions possible:
+| Naming Convention | Field names | Type names  | Arguments  | Enum values |
+|-------------------|-------------|-------------|------------|-------------|
+| `hasura-default`  | Snake case  | Snake case  | Snake case | as defined  |
+| `graphql-default` | Camel case  | Pascal case | Camel case | Uppercased  |
+
+Suppose there is a table called `my_table` and it has columns `id`, `date_of_birth`, `last_seen`, then with
+`graphql-default` naming convention we will get the following auto-generated API:
+
+```
+query {
+  myTable(orderBy: {dateOfBirth: asc}, limit: 10) {
+    id
+    dateOfBirth
+    lastSeen
+  }
+}
+```
+
+
+To configure the naming convention for a source, set the naming convention in source
+customisation while adding the source:
+
+```JSON
+{
+  "resource_version": 2,
+  "metadata": {
+    "version": 1,
+    "sources": [
+      {
+        "name": "default",
+        "kind": "postgres",
+        "tables": [],
+        "configuration": {},
+        "customization": {
+          "naming_convention": "graphql-default"
+        }
+      }
+    ]
+  }
+}
+```
+
+To set the default naming convention globally,
+use the environment variable `HASURA_GRAPHQL_DEFAULT_NAMING_CONVENTION`.  Note
+that the global default can be overridden by the source customisation setting mentioned above.
+
+Note: Custom field names and custom table names will override the naming convention
+(i.e. if the custom table name is `my_table` and `naming_convention`
+is `graphql-default`, the field names generated will be `my_table`, `my_tableByPk`,
+`my_tableAggregate` and so on).
+
+### Behaviour Changes
+
+- cli: change the ordering used for object fields in metadata files to alphabetical order
+
+  Example:
+  <table>
+     <thead>
+        <tr>
+           <th>Server Metadata (JSON)</th>
+           <th>Old behaviour (YAML)</th>
+           <th>New Behaviour (YAML)</th>
+        </tr>
+     </thead>
+     <tbody>
+        <tr>
+           <td>
+              <pre>
+  {
+    "function": {
+      "schema": "public",
+      "name": "search_albums"
+    }
+  }
+         </pre>
+           </td>
+           <td>
+              <pre>
+  function:
+    schema: public
+    name: search_albums
+        </pre>
+           </td>
+           <td>
+              <pre>
+  function:
+    name: search_albums
+    schema: public
+        </pre>
+           </td>
+        </tr>
+     </tbody>
+  </table>
+
+### Bug fixes and improvements
+
+- server: fix create event trigger failure for MSSQL sources on a table with a table name that is a reserved MSSQL keyword.
+- server: errors from `/healthz` endpoint are now logged with more details
+- server: do not expand environment variable references in logs or API responses from remote schemas, actions and event triggers for security reasons
+- server: introduce [backend_only permissions](https://hasura.io/docs/latest/graphql/core/auth/authorization/permission-rules/#backend-only-permissions) for update and delete mutations (fix #5275)
+- server: add support for scalar array response type in actions
+- server: add support for table computed fields in bigquery backends
+- server: fix failure when executing consecutive delete mutations on mssql (#8462)
+- server: bugfix: insertion of multiple empty objects should result in multiple entries (#8475)
+- server: allow schemas prefixed with `pg`, but not `pg_` (fix hasura/graphql-engine#8435)
+- console: add support for application/x-www-form-urlencoded in rest connectors (#8097)
+- server: restore the ability to do no-op upserts (#8260).
+
+## v2.8.0-beta.1
+
+### Disabling query/subscription root fields
+
+When a table is tracked in graphql-engine, three root fields are generated automatically
+namely `<table>`, `<table>_by_pk` and `<table>_aggregate` in the `query` and the `subscription`
+root. You can now control which root fields are exposed for a given role by specifying them in the select permission.
+
+The main use-case for this feature is to disable APIs that access the table directly but which still need to be tracked so that:
+
+1. It can be accessed via a relationship to another table
+2. It can be used in select permissions for another table via a relationship
+
+For such use-cases, we can disable all the root fields of the given table. This can be done by setting the select permission as follows:
+
+```json
+{
+   "role": "user",
+   "permission": {
+     "columns": [
+       "id",
+       "name"
+     ],
+     "filter": {},
+     "allow_aggregations": true,
+     "query_root_fields": [],
+     "subscription_root_fields": []
+   }
+ }
+```
+
+Another use-case is to allow a role to directly access a table only
+if it has access to the primary key value. This can be done by setting the select permission as follows:
+
+```json
+{
+   "role": "user",
+   "permission": {
+     "columns": [
+       "id",
+       "name"
+     ],
+     "filter": {},
+     "allow_aggregations": false,
+     "query_root_fields": ["select_by_pk"],
+     "subscription_root_fields": ["select_by_pk"]
+   }
+ }
+```
+
+Note that console support for this permission will be released later.
+
+
+### Introducing naming conventions (experimental)
+
+Now, users can specify the naming convention of the auto-generated names in the HGE.
+This is an experimental feature and is supported for postgres databases only for now. There are two naming
+conventions possible:
+| Naming Convention | Field names | Type names  | Arguments  | Enum values |
+|-------------------|-------------|-------------|------------|-------------|
+| `hasura-default`  | Snake case  | Snake case  | Snake case | as defined  |
+| `graphql-default` | Camel case  | Pascal case | Camel case | Uppercased  |
+
+Suppose there is a table called `my_table` and it has columns `id`, `date_of_birth`, `last_seen`, then with
+`graphql-default` naming convention we will get the following auto-generated API:
+
+```
+query {
+  myTable(orderBy: {dateOfBirth: asc}, limit: 10) {
+    id
+    dateOfBirth
+    lastSeen
+  }
+}
+```
+
+
+To configure the naming convention for a source, set the naming convention in source
+customisation while adding the source:
+
+```JSON
+{
+  "resource_version": 2,
+  "metadata": {
+    "version": 1,
+    "sources": [
+      {
+        "name": "default",
+        "kind": "postgres",
+        "tables": [],
+        "configuration": {},
+        "customization": {
+          "naming_convention": "graphql-default"
+        }
+      }
+    ]
+  }
+}
+```
+
+To set the default naming convention globally,
+use the environment variable `HASURA_GRAPHQL_DEFAULT_NAMING_CONVENTION`.  Note
+that the global default can be overridden by the source customisation setting mentioned above.
+
+Note: Custom field names and custom table names will override the naming convention
+(i.e. if the custom table name is `my_table` and `naming_convention`
+is `graphql-default`, the field names generated will be `my_table`, `my_tableByPk`,
+`my_tableAggregate` and so on).
+
+### Behaviour Changes
+
+- cli: change the ordering used for object fields in metadata files to alphabetical order
+
+  Example:
+  <table>
+     <thead>
+        <tr>
+           <th>Server Metadata (JSON)</th>
+           <th>Old behaviour (YAML)</th>
+           <th>New Behaviour (YAML)</th>
+        </tr>
+     </thead>
+     <tbody>
+        <tr>
+           <td>
+              <pre>
+  {
+    "function": {
+      "schema": "public",
+      "name": "search_albums"
+    }
+  }
+         </pre>
+           </td>
+           <td>
+              <pre>
+  function:
+    schema: public
+    name: search_albums
+        </pre>
+           </td>
+           <td>
+              <pre>
+  function:
+    name: search_albums
+    schema: public
+        </pre>
+           </td>
+        </tr>
+     </tbody>
+  </table>
+
+### Bug fixes and improvements
+
+- server: errors from `/healthz` endpoint are now logged with more details
+- server: do not expand environment variable references in logs or API responses from remote schemas, actions and event triggers for security reasons
+- server: introduce [backend_only permissions](https://hasura.io/docs/latest/graphql/core/auth/authorization/permission-rules/#backend-only-permissions) for update and delete mutations (fix #5275)
+- server: add support for scalar array response type in actions
+- server: add support for table computed fields in bigquery backends
+- server: fix failure when executing consecutive delete mutations on mssql (#8462)
+- server: bugfix: insertion of multiple empty objects should result in multiple entries (#8475)
+- server: allow schemas prefixed with `pg`, but not `pg_` (fix hasura/graphql-engine#8435)
+- console: add support for application/x-www-form-urlencoded in rest connectors (#8097)
+- server: restore the ability to do no-op upserts (#8260).
+
+## v2.7.0
+
+### Streaming subscriptions
+
+Streaming subscriptions can be used to subscribe only to the data which has been changed in the
+query. The streaming is done on the basis of a cursor, which is chosen by the user.
+See [docs](https://hasura.io/docs/latest/graphql/core/databases/postgres/subscriptions/streaming/index/).
+
+Request payload:
+
+```graphql
+subscription GetUserLatestMessages ($user_id: uuid!) {
+  messages_stream (
+    cursor: {
+      initial_value: {id: 0},
+      ordering: ASC
+    },
+    batch_size: 1,
+    where: {user_id: {_eq: $user_id}}
+  ) {
+    id
+    message
+  }
+}
+```
+
+The above subscription streams the messages of the user corresponding to the ``user_id`` in batches of 1 message per batch.
+
+Suppose there are two messages to be streamed, then the server will send two responses as following:
+
+Response 1:
+
+```json
+{
+  "data": [
+    {
+      "id": 1,
+      "message": "How are you!"
+    }
+  ]
+}
+```
+
+Response 2:
+
+```json
+{
+  "data": [
+    {
+      "id": 5,
+      "message": "I am fine"
+    }
+  ]
+}
+```
+
+### Bug fixes and improvements
+
+- server: add support for custom scalar in action output type (#4185)
+- server: add support for MSSQL event triggers (#7228)
+- server: update pg_dump to be compatible with postgres 14 (#7676)
+- server: fix bug where timestamp values sent to postgres would erroneously trim leading zeroes (#8096)
+- server: fix metadata handling bug when event triggers were defined on tables that contained non lower-case alphabet characters (#8454)
+- server: avoid encoding 'varchar' values to UTF8 in MSSQL backends
+- server: fix dropping of nested typed null fields in actions (#8237)
+- server: fix url/query date variable parsing bug in REST endpoints
+- server: make url/query variables in REST endpoints assume string if other types not applicable
+- server: fix inserting empty objects with default values to postgres, citus, and sql server (#8475)
+- server: don't drop the SQL triggers defined by the graphql-engine when DDL changes are made using the `run_sql` API
+- console: new "add remote schema" page with GQL customization
+- console: allow users to remove prefix / suffix / root field namespace from a remote schema
+- console: fix console crash on adding pg sources with connection params through api (#8416)
+- cli: avoid exporting hasura-specific schemas during hasura init (#8352)
+- cli: fix performance regression in `migrate status` command (#8398)
+
+## v2.6.2
+
+### Bug fixes and improvements
+
+- server: fix inserting empty objects with default values to postgres, citus, and sql server (fix #8475)
+
+## v2.7.0-beta.1
+
+### Bug fixes and improvements
+
+- server: don't drop the SQL triggers defined by the graphql-engine when DDL changes are made using the `run_sql` API
+- server: fixed a bug where timestamp values sent to postgres would erroneously trim leading zeroes (#8096)
+- server: fix bug when event triggers where defined on tables that contained non lower-case alphabet characters
+- server: avoid encoding 'varchar' values to UTF8 in MSSQL backends
+- server: add support for MSSQL event triggers (#7228)
+- server: update pg_dump to be compatible with postgres 14 (#7676)
+- server: fix parsing remote relationship json definition from 1.x server catalog on migration (fix #7906)
+- server: Don't drop nested typed null fields in actions (fix #8237)
+- server: fixes remote relationships on actions (fix #8399)
+- server: fixes url/query date variable bug in REST endpoints
+- server: makes url/query variables in REST endpoints assume string if other types not applicable
+- server: fix inserting empty objects with default values to postgres, citus, and sql server (fix #8475)
+- server: allow casting most postgres scalar types to strings in comparison expressions (fix #8524)
+- console: add remote database relationships for views
+- console: bug fixes for RS-to-RS relationships
+- console: exclude `_timescaledb_internal` from db introspection sql, for performance reasons ()
+- console: allow users to remove prefix / suffix / root field namespace from a remote schema
+- console: new "add remote schema" page (with GQL customization)
+- console: fix console crash on adding pg sources with connection params through api
+- cli: avoid exporting hasura-specific schemas during hasura init (#8352)
+- cli: fix performance regression in `migrate status` command (fix #8398)
+
+## v2.6.1
+
+- server: fix bug when event triggers where defined on tables that contained non lower-case alphabet characters (fix #8454)
+- server: refactor insert mutations IR use of "default values" (fixes #8443)
+
+## v2.5.2
+
+- server: refactor insert mutations IR use of "default values" (fixes #8443)
+
+## Milestone Release - v2.6.0
+
+### Known issue
+SQL Server: Mutation: [Default values overwritten on insert under certain conditions](https://github.com/hasura/graphql-engine/issues/8443). Will be addressed in 2.5.2 and 2.6.1.
+
+### Announcing GraphQL Joins
+We are delighted to announce Hasura’s data federation capabilities that accelerate the API development process by creating a single GraphQL schema from multiple data sources such as databases and remote GraphQL APIs. This allows you to query and mutate across federated data sources in real-time without writing any custom code. In addition, we can leverage many of Hasura’s powerful features from Hasura CE and Hasura Cloud.
+Hasura’s field level permissions for remote schemas applies for joins as well, allowing for tightly controlled data disclosure when federating sources.
+Leverage Hasura Cloud’s caching directive to instantly put caching in front of multiple remote GraphQL schemas.
+
+### Breaking changes
+The query and raw-query field from http-logs for metadata requests are removed by default. Use HASURA_GRAPHQL_ENABLE_METADATA_QUERY_LOGGING to re-enable those fields.
+
+### Bug fixes and improvements
+- server: removed 'query' and 'raw-query' field from logs for metadata queries by default. Use HASURA_GRAPHQL_ENABLE_METADATA_QUERY_LOGGING to re enable those fields.
+- server: clear_metadata now correctly archives event triggers and the drop source API drops indirect dependencies created by remote relationships when the dependent source is dropped.
+- server: fix inserting values into columns with case sensitive enum types for PostgreSQL/Citus backends (fix #4014)
+- server: remote relationships can be defined on and to Microsoft SQL Server tables
+- server: fix issues with JSON key encoding for remote schemas (fixes #7543 and #8200)
+- server: fix Microsoft SQL Server insert mutation when relationships are used in check permissions (fix #8225)
+- server: refactor GraphQL query static analysis and improve OpenAPI warning messages
+- server: avoid a resource leak when connecting to PostgreSQL fails
+- server: fix parsing remote relationship json definition from 1.x server catalog on migration (fix #7906)
+- server: Don't drop nested typed null fields in actions (fix #8237)
+- server: fixes remote relationships on actions (fix #8399)
+- server: update pg_dump to be compatible with Postgres 14 (#7676)
+- console: add support for setting aggregation query permissions for Microsoft SQL Server
+- console: add support for RS-to-DB and RS-to-RS relationships to Remote Schemas
+- console: removed the need for clicking the Modify btn before editing a remote schema (#1193, #8262)
+- console: add remote database relationships support for views
+- cli: fix remote schema metadata formatting issues (#7608)
+- cli: fix query collections metadata formatting issues (#7616)
+- cli: fix performance regression in migrate status command (fix #8398)
+- docs: support for graphql-ws is considered GA
+
+## v2.5.1
+
+### Known issue
+SQL Server: Mutation: [Default values overwritten on insert under certain conditions](https://github.com/hasura/graphql-engine/issues/8443). Will be addressed in 2.5.2 and 2.6.1.
+
+### Bug fixes and improvements
+- server: fixes remote relationships on actions (fix #8399)
+- server: validate top level fragments in GQL query
+- cli: fix performance regression in `migrate status` command (fix #8398)
+
+## v2.6.0-beta.2
+
+### Bug fixes and improvements
+- server: fix parsing remote relationship json definition from 1.x server catalog on migration (fix #7906)
+- server: Don't drop nested typed null fields in actions (fix #8237)
+- server: fixes remote relationships on actions (fix #8399)
+- server: update pg_dump to be compatible with postgres 14 (#7676)
+- console: add remote database relationships for views
+- cli: fix performance regression in `migrate status` command (fix #8398)
+
+## v2.6.0-beta.1
+
+### Breaking changes
+
+- The `query` and `raw-query` field from http-logs for metadata requests are removed by default. Use
+  `HASURA_GRAPHQL_ENABLE_METADATA_QUERY_LOGGING` to renable those fields.
+
+### Bug fixes and improvements
+
+- server: Fix BigQuery overflow issue when using Decimal/BigDecimal data type.
+- server: remove 'query' and 'raw-query' field from logs for metadata queries by default. Use `HASURA_GRAPHQL_ENABLE_METADATA_QUERY_LOGGING` to renable those fields.
+- server: `clear_metadata` now correctly archives event triggers and the drop source API drops indirect dependencies created by remote relationships when the dependent source is dropped.
+- server: fix inserting values into columns with case sensitive enum types for PostgreSQL/Citus backends (fix #4014)
+- server: remote relationships can be defined _on_ and _to_ Microsoft SQL Server tables
+- server: fix issues with JSON key encoding for remote schemas (fixes #7543 and #8200)
+- server: fix Microsoft SQL Server insert mutation when relationships are used in check permissions (fix #8225)
+- server: refactor GraphQL query static analysis and improve OpenAPI warning messages
+- server: avoid a resource leak when connecting to PostgreSQL fails
+- console: add support for setting aggregation query permissions for Microsoft SQL Server
+- console: add support for RS-to-DB and RS-to-RS joins to Remote Schemas tab
+- console: removed the need for clicking the Modify btn before editing a remote schema (#1193, #8262)
+- cli: fix remote schema metadata formatting issues (#7608)
+- cli: fix query collections metadata formatting issues (#7616)
+- docs: support for `graphql-ws` is considered GA
+
+## v2.5.0
+
+### Remote relationships from remote schemas
+
+This release adds three new metadata API commands:
+- `create_remote_schema_remote_relationship`
+- `update_remote_schema_remote_relationship`
+- `delete_remote_schema_remote_relationship`
+
+that allows to create remote relationships between remote schemas on
+the left-hand side and databases or remote schemas on the right-hand
+side. Both use the same syntax as remote relationships from databases:
+
+```yaml
+type: create_remote_schema_remote_relationship
+args:
+  remote_schema: LeftHandSide
+  type_name: LeftHandSideTypeName
+  name: RelationshipName
+  definition:
+    to_remote_schema:
+      remote_schema: RightHandSideSchema
+      lhs_fields: [LHSJoinKeyName]
+      remote_field:
+        rhsFieldName:
+          arguments:
+            ids: $LHSJoinKeyName
+
+type: create_remote_schema_remote_relationship
+args:
+  remote_schema: LeftHandSide
+  type_name: LeftHandSideTypeName
+  name: RelationshipName
+  definition:
+    to_source:
+      source: RightHandSideSource
+      table: {schema: public, name: RHSTable}
+      relationship_type: object
+      field_mapping:
+        LHSJoinKeyName: RHSColumnName
+```
+
+Similarly to DB-to-DB relationships, only `Postgres` is supported on
+the right-hand side for now.
+
+### Deprecations
+* The `custom_column_names` property of TableConfig used on `<db>_track_table` and `set_table_customization` metadata APIs has been deprecated in favour of the new `column_config` property. `custom_column_names` will still work for now, however, values used in `column_config` will take precedence over values from `custom_column_names` and any overlapped values in `custom_column_names` will be discarded.
+
+### Behaviour Changes
+
+- cli: use indentation of 2 spaces in array elements of metadata YAML files
+
+  Example:
+  <table>
+  <thead>
+    <tr>
+      <th>Old behaviour<pre> metadata/query_collections.yaml</pre> </th>
+      <th>New behaviour<pre> metadata/query_collections.yaml </pre> </th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>
+        <pre>
+  - name: allowed-queries
+    definition:
+      queries:
+      - name: getAlbums
+        query: |
+          query getAlbums {
+            albums {
+              id
+              title
+            }
+          }
+         </pre>
+      </td>
+      <td>
+        <pre>
+  - name: allowed-queries
+    definition:
+      queries:
+        - name: getAlbums
+          query: |
+            query getAlbums {
+              albums {
+                id
+                title
+              }
+            }
+        </pre>
+      </td>
+    </tr>
+  </tbody>
+  </table>
+
+  This change is a result of fixing some inconsistencies and edge cases in writing array elements.
+  `hasura metadata export` will write YAML files in this format going forward. Also, note that this is a backwards compatible change.
+
+- cli: change ordering of elements in metadata files to match server metadata
+
+  Example:
+  <table>
+     <thead>
+        <tr>
+           <th>Server Metadata (JSON)</th>
+           <th>Old behaviour (YAML)</th>
+           <th>New Behaviour (YAML)</th>
+        </tr>
+     </thead>
+     <tbody>
+        <tr>
+           <td>
+              <pre>
+  {
+    "function": {
+      "schema": "public",
+      "name": "search_albums"
+    }
+  }
+         </pre>
+           </td>
+           <td>
+              <pre>
+  function:
+    name: search_albums
+    schema: public
+        </pre>
+           </td>
+           <td>
+              <pre>
+  function:
+    schema: public
+    name: search_albums
+        </pre>
+           </td>
+        </tr>
+     </tbody>
+  </table>
+
+### Streaming subscriptions
+
+Streaming subscriptions can be used to subscribe only to the data which has been changed in the
+query. The streaming is done on the basis of a cursor, which is chosen by the user.
+
+Request payload:
+
+```
+subscription GetUserLatestMessages ($user_id: uuid!) {
+  messages_stream (cursor: {initial_value: {id: 0}, ordering: ASC}, batch_size: 1, where: {user_id: {_eq: $user_id}} ) {
+    id
+    from
+    to
+  }
+}
+```
+
+The above subscription streams the messages of the user corresponding to the ``user_id`` in batches of 1 message per batch.
+
+Suppose there are two messages to be streamed, then the server will send two responses as following:
+
+Response 1:
+
+```
+{
+  "data": [
+    {
+      "id": 1,
+      "from": 155234,
+      "to": 155523
+    }
+    ]
+}
+```
+
+Response 2:
+
+```
+{
+  "data": [
+    {
+      "id": 5,
+      "from": 178234,
+      "to": 187523
+    }
+    ]
+}
+```
+
+### Bug fixes and improvements
+
+- server: improve error messages in BigQuery upstream API exceptions
+- server: Fix regression in MSSQL subscriptions when results exceed 2048 characters (#8267)
+- server: refactor OpenAPI spec generation (for REST endpoints) and improve OpenAPI warnings
+- server: add jsonb to string cast support - postgres (#7818)
+- server: improve performance of fetching postgres catalog metadata for tables and functions
+- server: Queries present in query collections, such as allow-list and rest-endpoints, are now validated (fixes #7497)
+- server: improve SQL generation for BigQuery backend queries involving `Orderby`.
+- server: fix regression where remote relationships would get exposed over Relay, which is unsupported
+- server: add support for customising the GraphQL schema descriptions of table columns in metadata
+- server: column presets for SQL Server were broken and consequently insert and upsert mutations were failing with constraint violations. This change fixes this behavior (#8221).
+- server: fix caching bug with session variables in remote joins
+- server: fix regression where JWKs are refreshed once per second when both must-revalidate and max-age are specified in the Cache-Control header (#8299)
+- server: respect custom field names in delete, insert and update mutations on SQL Server (#8314)
+- console: enable searching tables within a schema in the sidebar
+- console: add support for setting comments on the custom root fields of tables/views
+- console: add feature flags section in settings
+- console: improved support for setting comments on computed fields
+- console: fix the ability to create updated_at and created_at in the modify page (#8239)
+- console: fix an issue where editing both a column's name and its GraphQL field name at the same time caused an error
+- console: fix redirect to metadata status page on inconsistent inherited role (#8343)
+- console: fix malformed request with REST live preview section (#8316)
+- console: fixed actions search to be case-insensitive
+- cli: add support for customization field in sources metadata (#8292)
+- cli: fix inherited roles metadata not being updated when dropping all roles (#7872)
+- ci: ubuntu and centos flavoured graphql-engine images are now available
+
+## v2.4.0
+
+### Bug fixes and improvements
+
+- server: add custom function for case insensitive lookup in session variable in request transformation
+- server: add metadata inconsistency information in reload_metadata API call
+- server: Webhook Transforms can now delete request/response bodies explicitly.
+- server: Fix truncation of session variables with variable length column types in MSSQL (#8158)
+- server: improve performance of `replace_metadata` for large schemas
+- server: improve baseline memory consumption for typical workloads
+- server: fix parsing timestamp values in BigQuery backends (fix #8076)
+- server: add support for customising the GraphQL schema descriptions of table root fields
+- server: add a `request_headers` field to the `test_webhook_transform` API.
+- console: include cron trigger with include in metadata as false on cron trigger manage page
+- console: show an error notification if Hasura CLI migrations fail
+- console: fixed an issue where cron triggers were not removed from the list after deletion
+- console: only show tables from current schema in clone permissions section
+- console: provide checkbox to remove body in rest connectors
+- cli: fix metadata version being set to 3 when doing `hasura init --version 2` (#8148)
+
+## v2.4.0-beta.3
+
+- server: fix regression in MSSQL subscriptions when results exceed 2048 characters (#8267)
+
+## v2.4.0-beta.2
+
+- server: fix regression where remote relationships would get exposed over Relay, which is unsupported
+
+## v2.3.1
+
+- server: fix regression where remote relationships would get exposed over Relay, which is unsupported
+
+## v2.2.2
+
+- server: fix regression where remote relationships would get exposed over Relay, which is unsupported
+
+## v2.4.0-beta.1
+
+### Bug fixes and improvements
+(Add entries below in the order of server, console, cli, docs, others)
+
+- server: add metadata inconsistency information in `reload_metadata` API call
+- server: add custom function for case insensitive lookup in session variable in request transformation
+- server: Improved error messaging for `test_webhook_transform` metadata API endpoint
+- server: Webhook Tranforms can now produce `x-www-url-formencoded` bodies.
+- server: Webhook Transforms can now delete request/response bodies explicitly.
+- server: Fix truncation of session variables with variable length column types in MSSQL (#8158)
+- server: improve performance of `replace_metadata` for large schemas
+- server: improve baseline memory consumption for typical workloads
+- server: fix parsing timestamp values in BigQuery backends (fix #8076)
+- server: add support for customising the GraphQL schema descriptions of table root fields
+- server: add a `request_headers` field to the `test_webhook_transform` API.
+- server: add support for relationships on nested action fields
+- console: include cron trigger with include in metadata as false on cron trigger manage page
+- console: show an error notification if Hasura CLI migrations fail
+- console: fixed an issue where cron triggers were not removed from the list after deletion
+- console: only show tables from current schema in clone permissions section
+- console: provide checkbox to remove body in rest connectors
+- cli: fix metadata version being set to 3 when doing `hasura init --version 2` (#8148)
+
+## v2.3.0
+
+### Experimental SQL optimizations
+Row-level permissions are applied by a translation into SQL `WHERE` clauses. If
+some tables have similar row-level permission filters, then the generated SQL
+may be repetitive and not perform well, especially for GraphQL queries that make
+heavy use of relationships.
+
+This version includes an _experimental_ optimization for some SQL queries.  It
+is expressly experimental, because of the security-sensitive nature of the
+transformation that it applies. You should scrutinize the optimized SQL
+generated by this feature before using it in production.
+
+The optimization can be enabled using the
+`--experimental-features=optimize_permission_filters` flag or the
+`HASURA_GRAPHQL_EXPERIMENTAL_FEATURES` environment variable.
+
+### Breaking changes
+* Computed field comments are now used as the description for the field in the GraphQL schema. This means that computed fields where the comment has been set to empty string will cause the description of the field in the GraphQL schema to also be blank. Setting the computed field comment to null will restore the previous auto-generated description. The previous version of the Console would set the comment to empty string if the comment textbox was left blank, so some existing computed fields may unintentionally have empty string set as their comment.
+
+### Bug fixes and improvements
+
+- server: validate saved REST endpoint queries wrt schema
+- server: improved error reporting for env vars in `test_webhook_transform` metadata API endpoint
+- server: extend allowlist metadata with scope information, new command `update_scope_of_allowlist_in_metadata`
+- server: (Postgres, Citus, and MSSQL backends) Identity columns and computed
+  columns are now marked immutable, removing them from the schema of insert and
+  update mutations.
+- server: allow inserting more than 1 row simultaneously into table with generated columns (fix #4633)
+  that have generated columns in Postgres.
+- server: postgres: return a single entry per row (selected randomly) when an object relationship has multiple matches (fix #7936)
+- server: Updates Kriti to v0.3.0
+- server: add operation name in the request sent to remote schemas
+- server: add support for scalar response types for actions (fix #7805)
+- server: fix nullable action response (fix #4405)
+- server: add support for customization of table & computed field GraphQL schema descriptions (fix #7496)
+- server: classify MSSQL exceptions and improve API error responses
+- server: MSSQL generates correct SQL when object relationships are null.
+- console: add support for remote database relationships
+- console: enable support for update permissions for mssql
+- cli: skip tls verfication for all API requests when `insecure-skip-tls-verify` flag is set (fix #4926)
+- server: fix issues working with read-only DBs by reverting the need for storing required SQL functions in a `hdb_lib` schema in the user's DB
+- server: Fix experimental sql optimization read from `HASURA_GRAPHQL_EXPERIMENTAL_FEATURES` or `--experimental-features`
+
+## v2.3.0-beta.3
+
+- server: Fix experimental sql optimization read from `HASURA_GRAPHQL_EXPERIMENTAL_FEATURES` or `--experimental-features`
+
+## v2.2.1
+
+- server: postgres: return a single entry per row (selected randomly) when an object relationship has multiple matches (fix #7936)
+- console: add support for remote database relationships
+
+## v2.3.0-beta.2
+
+- server: fix issues working with read-only DBs by reverting the need for storing required SQL functions in a `hdb_lib` schema in the user's DB
+
+## v2.3.0-beta.1
+
+
+### Experimental SQL optimizations
+Row-level permissions are applied by a translation into SQL `WHERE` clauses. If
+some tables have similar row-level permission filters, then the generated SQL
+may be repetitive and not perform well, especially for GraphQL queries that make
+heavy use of relationships.
+
+This version includes an _experimental_ optimization for some SQL queries.  It
+is expressly experimental, because of the security-sensitive nature of the
+transformation that it applies. You should scrutinize the optimized SQL
+generated by this feature before using it in production.
+
+The optimization can be enabled using the
+`--experimental-features=optimize_permission_filters` flag or the
+`HASURA_GRAPHQL_EXPERIMENTAL_FEATURES` environment variable.
+
+### Breaking changes
+* Computed field comments are now used as the description for the field in the GraphQL schema. This means that computed fields where the comment has been set to empty string will cause the description of the field in the GraphQL schema to also be blank. Setting the computed field comment to null will restore the previous auto-generated description. The previous version of the Console would set the comment to empty string if the comment textbox was left blank, so some existing computed fields may unintentionally have empty string set as their comment.
+
+### Bug fixes and improvements
+
+- server: validate saved REST endpoint queries wrt schema
+- server: improved error reporting for env vars in `test_webhook_transform` metadata API endpoint
+- server: extend allowlist metadata with scope information, new command `update_scope_of_allowlist_in_metadata`
+- server: (Postgres, Citus, and MSSQL backends) Identity columns and computed
+  columns are now marked immutable, removing them from the schema of insert and
+  update mutations.
+- server: allow inserting more than 1 row simultaneously into table with generated columns (fix #4633)
+  that have generated columns in Postgres.
+- server: postgres: return a single entry per row (selected randomly) when an object relationship has multiple matches (fix #7936)
+- server: Updates Kriti to v0.3.0
+- server: add operation name in the request sent to remote schemas
+- server: add support for scalar response types for actions (fix #7805)
+- server: fix nullable action response (fix #4405)
+- server: add support for customization of table & computed field GraphQL schema descriptions (fix #7496)
+- server: classify MSSQL exceptions and improve API error responses
+- server: MSSQL generates correct SQL when object relationships are null.
+- console: add support for remote database relationships
+- console: enable support for update permissions for mssql
+- cli: skip tls verfication for all API requests when `insecure-skip-tls-verify` flag is set (fix #4926)
+
+## v2.2.0
+
+### Nested Action Types
+Actions now support nested responses as described by associated action types.Example:
+```graphql
+type Product {
+ id: bigint!
+ name: String
+}
+type ElasticOutput {
+ products: [Product!]!
+ aggregations: jsonb
+}
+```
+Previously, nested responses could be encapsulated in a generic "jsonb" output type but this loses precise type information for the API. The current support now allows specifying complex return types for the output.
+
+Currently limits action relationships to top-level fields in the output types.
+
+### GraphQL REST Endpoints OpenAPI Body Specifications
+
+GraphQL REST endpoints are documented via Swagger (OpenAPI) under the `/api/swagger/json` endpoint. We now document the request and response bodies of the endpoints in addition to previous information.
+
+### MS SQL Server Update for Hasura Server
+
+##### Expand Transactions to GraphQL Queries and mssql_run-sql API
+
+Extend transactions to GraphQL queries and mssql_run_sql API
+
+##### Rollback a Transaction Based in the Transaction State
+
+We can query the transaction state using XACT_STATE() scalar function. If the transaction is not active, don't rollback the transaction.
+
+##### Upsert - SQL Generation and Execution
+
+We are translating the if_matched section from the graphql, which is represented by the if_matched  type, to a MERGE SQL statement. Example:
+
+```
+mutation {
+  insert_author(
+    objects: { id: 1, name: "aaa" }
+    if_matched: { match_columns: author_pkey, update_columns: name }
+  ) {
+    returning {
+      id
+      name
+    }
+  }
+}
+```
+
+### Breaking Changes
+- For any **MSSQL** backend, count aggregate query on multiple columns is restricted with a GraphQL
+  schema change as follows
+
+```diff
+count (
+---  columns: [table_select_column!]
++++  column: table_select_column
+  distinct: Boolean
+): Int!
+```
+  MSSQL doesn't support applying `COUNT()` on multiple columns.
+
+
+### Bug fixes and improvements
+
+- server: add a placeholder field to the schema when the `query_root` would be empty
+- server: fix invalid GraphQL name in the schema arising from a remote relationship from a table in a custom schema
+- server: add a new metadata API `get_cron_triggers` to fetch all the cron triggers
+- server: add response transforms for actions, events, and triggers
+- server: bigquery: implement `distinct_on`.
 - server: extend transactions to MSSQL GraphQL queries and `mssql_run_sql` /v2/query API
 - server: improve error messages in MSSQL database query exceptions
 - server: in mssql transactions, rollback only if the transaction is active
 - server: add request and response bodies to OpenAPI specification of REST endpoints
 - server: implement upsert mutations for MS SQL Server (close #7864)
-- server: bigquery: implement `distinct_on`.
-- console: action/event trigger transforms are now called REST connectors
-
-### Bug fixes and improvements
-(Add entries below in the order of server, console, cli, docs, others)
-
 - server: extend support for insert mutations to tables without primary key constraint in a MSSQL backend
 - server: fix parsing FLOAT64s in scientific notation and non-finite ones in BigQuery
 - server: extend support for the `min`/`max` aggregates to all comparable types in BigQuery
 - server: fix support for joins in aggregates nodes in BigQuery
+- server: fix for passing input objects in query variables to remote schemas with type name customization (#7977)
+- server: fix REST endpoints with path segments not showing correctly in the OpenAPI spec
+- server: fix aliases used in GraphQL queries in REST endpoints not being reflected in the OpenAPI spec
+- server: refresh JWKs a maximum of once per second (fix #5781)
+- server: implement update mutations for MS SQL Server (closes #7834)
+- server: support nested output object types in actions (#4796)
+- server: action webhook requests now include a User-Agent header (fix #8070)
+- console: action/event trigger transforms are now called REST connectors
+- console: fix list of tables (and schemas) being unsorted when creating a new trigger event (fix #6391)
+- console: fix custom field names breaking browse table sorting and the pre-populating of the edit row form
+- console: enable support for insert & delete permissions for mssql tables
+- console: enable inherited role on settings page
 - cli: migrate and seed subcommands has an option in prompt to choose and apply operation on all available databases
 - cli: fix `metadata diff --type json | unified-json` behaving incorrectly and showing diff in YAML format.
 - cli: fix regression in `migrate create` command (#7971)
 - cli: stop using `/healthz` endpoint to determine server health
+- cli: fix regression with `--address` flag of `hasura console` command (#8005)
 
 ## v2.1.1
 
-- server: implement update mutations for MS SQL Server (closes #7834)
 - server: provides a more comprehensive fix for the JSON ser/de backwards incompatibility that was initially addressed by 45481db (#7906)
 
 ## v2.1.0
@@ -52,7 +1694,6 @@
 - server: support database-to-database joins with BigQuery
 - server: improved startup time when using large remote schemas
 - server: fix rest-endpoints bug allow list arguments (fix #7135)
-- server: support nested output object types in actions (#4796)
 - server: fallback to unauthorized role when JWT is not found in cookie (fix #7272)
 - server: add support for building linux/arm64 docker image (#6337, #1266)
 - server: provide option to explicitly recreate event triggers for sources in the `reload_metadata` API
@@ -66,6 +1707,7 @@
 - cli: fix cli-console failing to add migrations if there are tabs in SQL body (#7362)
 - cli: sign windows binary of Hasura CLI (#7147)
 - cli: core CLI features are not blocked in environments without internet (#7695)
+- server: add `_like`/`_nlike` and spatial operators for BigQuery
 
 ## v2.1.0-beta.2
 

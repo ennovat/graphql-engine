@@ -11,14 +11,14 @@ import Data.Aeson
 import Data.Text qualified as T
 import Hasura.Prelude
 import Hasura.RQL.Types.Backend
+import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Common
-import Hasura.SQL.Backend
 
 -- order by col
 
 data OrderByCol
-  = OCPG !FieldName
-  | OCRel !FieldName !OrderByCol
+  = OCPG FieldName
+  | OCRel FieldName OrderByCol
   deriving (Show, Eq)
 
 instance FromJSON OrderByCol where
@@ -50,9 +50,9 @@ orderByColFromTxt =
 -- order by item
 
 data OrderByItemG (b :: BackendType) a = OrderByItemG
-  { obiType :: !(Maybe (BasicOrderType b)),
-    obiColumn :: !a,
-    obiNulls :: !(Maybe (NullsOrderType b))
+  { obiType :: Maybe (BasicOrderType b),
+    obiColumn :: a,
+    obiNulls :: Maybe (NullsOrderType b)
   }
   deriving (Functor, Foldable, Traversable, Generic)
 

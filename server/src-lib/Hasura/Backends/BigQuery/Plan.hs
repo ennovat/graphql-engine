@@ -1,3 +1,5 @@
+{-# LANGUAGE MonadComprehensions #-}
+
 -- | Planning T-SQL queries and subscriptions.
 module Hasura.Backends.BigQuery.Plan
   ( planNoPlan,
@@ -6,32 +8,47 @@ where
 
 import Control.Monad.Validate
 import Data.Aeson.Text
+import Data.List.NonEmpty qualified as NE
+import Data.Map.Strict qualified as Map
 import Data.Text.Extended
 import Data.Text.Lazy qualified as LT
+import Hasura.Authentication.Session (SessionVariables)
+import Hasura.Authentication.User (UserInfo (..))
+import Hasura.Backends.BigQuery.DDL (scalarTypeFromColumnType)
 import Hasura.Backends.BigQuery.FromIr as BigQuery
 import Hasura.Backends.BigQuery.Types
 import Hasura.Base.Error qualified as E
-import Hasura.GraphQL.Parser qualified as GraphQL
 import Hasura.Prelude
 import Hasura.RQL.IR
+import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Column qualified as RQL
-import Hasura.SQL.Backend
 import Hasura.SQL.Types
-import Hasura.Session
 
 --------------------------------------------------------------------------------
 -- Top-level planner
 
 planNoPlan ::
-  MonadError E.QErr m =>
+  (MonadError E.QErr m) =>
   FromIrConfig ->
   UserInfo ->
-  QueryDB 'BigQuery Void (GraphQL.UnpreparedValue 'BigQuery) ->
+  QueryDB 'BigQuery Void (UnpreparedValue 'BigQuery) ->
   m Select
 planNoPlan fromIrConfig userInfo queryDB = do
   rootField <- traverse (prepareValueNoPlan (_uiSession userInfo)) queryDB
-  runValidate (BigQuery.runFromIr fromIrConfig (BigQuery.fromRootField rootField))
-    `onLeft` (E.throw400 E.NotSupported . (tshow :: NonEmpty Error -> Text))
+
+  (select, FromIrWriter {fromIrWriterNativeQueries}) <-
+    runValidate (BigQuery.runFromIr fromIrConfig (BigQuery.fromRootField rootField))
+      `onLeft` (E.throw400 E.NotSupported . (tshow :: NonEmpty Error -> Text))
+
+  -- Native queries used within this query need to be converted into CTEs.
+  -- These need to come before any other CTEs in case those CTEs also depend on
+  -- the native queries.
+  let nativeQueries :: Maybe With
+      nativeQueries = do
+        ctes <- NE.nonEmpty (Map.toList fromIrWriterNativeQueries)
+        pure (With [Aliased query aliasedAlias | (Aliased {aliasedAlias}, query) <- ctes])
+
+  pure select {selectWith = nativeQueries <> selectWith select}
 
 --------------------------------------------------------------------------------
 -- Resolving values
@@ -41,14 +58,14 @@ planNoPlan fromIrConfig userInfo queryDB = do
 prepareValueNoPlan ::
   (MonadError E.QErr m) =>
   SessionVariables ->
-  GraphQL.UnpreparedValue 'BigQuery ->
+  UnpreparedValue 'BigQuery ->
   m Expression
 prepareValueNoPlan sessionVariables =
   \case
-    GraphQL.UVLiteral x -> pure x
-    GraphQL.UVSession -> pure globalSessionExpression
+    UVLiteral x -> pure x
+    UVSession -> pure globalSessionExpression
     -- To be honest, I'm not sure if it's indeed the JSON_VALUE operator we need here...
-    GraphQL.UVSessionVar typ text ->
+    UVSessionVar typ text ->
       case typ of
         CollectableTypeScalar scalarType ->
           pure
@@ -61,8 +78,12 @@ prepareValueNoPlan sessionVariables =
             )
         CollectableTypeArray {} ->
           throwError $ E.internalError "Cannot currently prepare array types in BigQuery."
-    GraphQL.UVParameter _ RQL.ColumnValue {..} -> pure (ValueExpression cvValue)
+    UVParameter _ RQL.ColumnValue {..} ->
+      pure (ValueExpression (TypedValue (scalarTypeFromColumnType cvType) cvValue))
   where
     globalSessionExpression =
       ValueExpression
-        (StringValue (LT.toStrict (encodeToLazyText sessionVariables)))
+        ( TypedValue
+            StringScalarType
+            (StringValue (LT.toStrict (encodeToLazyText sessionVariables)))
+        )

@@ -19,20 +19,26 @@ module Hasura.Backends.MSSQL.Types.Internal
     Aliased (..),
     BooleanOperators (..),
     Column,
+    Declare (..),
     ColumnName (..),
+    columnNameToFieldName,
     ColumnType,
     Comment (..),
+    ConstraintName (..),
     Countable (..),
+    CountType (..),
     DataLength (..),
     Delete (..),
     DeleteOutput,
     EntityAlias (..),
+    fromAlias,
     Expression (..),
     FieldName (..),
     For (..),
     ForJson (..),
     From (..),
     FunctionApplicationExpression (..),
+    FunctionName (..),
     MergeUsing (..),
     MergeOn (..),
     MergeWhenMatched (..),
@@ -57,12 +63,14 @@ module Hasura.Backends.MSSQL.Types.Internal
     Deleted (..),
     Output (..),
     Projection (..),
+    QueryWithDDL (..),
     Reselect (..),
     Root (..),
     ScalarType (..),
     SchemaName (..),
     Select (..),
     SetIdentityInsert (..),
+    TempTableDDL (..),
     TempTableName (..),
     SomeTableName (..),
     TempTable (..),
@@ -83,33 +91,40 @@ module Hasura.Backends.MSSQL.Types.Internal
     Values (..),
     Where (..),
     With (..),
+    CTEBody (..),
     emptySelect,
     geoTypes,
     getGQLTableName,
+    getGQLFunctionName,
+    getTableIdentifier,
     isComparableType,
     isNumType,
     mkMSSQLScalarTypeName,
     parseScalarValue,
+    parseScalarType,
     scalarTypeDBName,
-    snakeCaseTableName,
+    snakeCaseName,
     stringTypes,
-    tempTableNameInserted,
-    tempTableNameValues,
-    tempTableNameDeleted,
-    tempTableNameUpdated,
+    namingConventionSupport,
   )
 where
 
 import Data.Aeson qualified as J
-import Data.Text.Encoding (encodeUtf8)
+import Data.Text qualified as T
+import Data.Text.Casing (GQLNameIdentifier)
+import Data.Text.Casing qualified as C
 import Database.ODBC.SQLServer qualified as ODBC
 import Hasura.Base.Error
+import Hasura.GraphQL.Parser.Name qualified as GName
+import Hasura.NativeQuery.Metadata (InterpolatedQuery)
 import Hasura.Prelude
-import Hasura.RQL.Types.Common qualified as RQL
-import Hasura.SQL.Backend
+import Hasura.RQL.IR.BoolExp (AnnRedactionExp)
+import Hasura.RQL.Types.Backend (SupportedNamingCase (..))
+import Hasura.RQL.Types.BackendType
 import Hasura.SQL.GeoJSON qualified as Geo
 import Hasura.SQL.WKT qualified as WKT
 import Language.GraphQL.Draft.Syntax qualified as G
+import Language.Haskell.TH.Syntax (Lift)
 
 --------------------------------------------------------------------------------
 -- Phantom pretend-generic types that are actually specific
@@ -123,7 +138,7 @@ type Value = ODBC.Value
 --------------------------------------------------------------------------------
 
 data UnifiedColumn = UnifiedColumn
-  { name :: Text,
+  { name :: ColumnName,
     type' :: ScalarType
   }
 
@@ -162,6 +177,7 @@ data BooleanOperators a
   | ASTOverlaps a
   | ASTTouches a
   | ASTWithin a
+  deriving stock (Eq)
 
 data Select = Select
   { selectWith :: (Maybe With),
@@ -218,7 +234,7 @@ data SetValue
 
 data SetIdentityInsert = SetIdentityInsert
   { setTable :: SomeTableName,
-    setValue :: !SetValue
+    setValue :: SetValue
   }
 
 type DeleteOutput = Output Deleted
@@ -295,18 +311,6 @@ data InsertValuesIntoTempTable = InsertValuesIntoTempTable
 -- | A temporary table name is prepended by a hash-sign
 newtype TempTableName = TempTableName Text
 
-tempTableNameInserted :: TempTableName
-tempTableNameInserted = TempTableName "inserted"
-
-tempTableNameValues :: TempTableName
-tempTableNameValues = TempTableName "values"
-
-tempTableNameDeleted :: TempTableName
-tempTableNameDeleted = TempTableName "deleted"
-
-tempTableNameUpdated :: TempTableName
-tempTableNameUpdated = TempTableName "updated"
-
 -- | A name of a regular table or temporary table
 data SomeTableName
   = RegularTableName TableName
@@ -317,6 +321,7 @@ data TempTable = TempTable
     ttColumns :: [ColumnName]
   }
 
+-- | A version of `Select` without a `FROM` clause. This means it can only project expressions already selected in adjacent join clauses, hence the name @reselect@.
 data Reselect = Reselect
   { reselectProjections :: [Projection],
     reselectFor :: For,
@@ -324,7 +329,7 @@ data Reselect = Reselect
   }
 
 data OrderBy = OrderBy
-  { orderByFieldName :: FieldName,
+  { orderByExpression :: Expression,
     orderByOrder :: Order,
     orderByNullsOrder :: NullsOrder,
     orderByType :: Maybe ScalarType
@@ -364,7 +369,8 @@ data Projection
 
 data Join = Join
   { joinSource :: JoinSource,
-    joinJoinAlias :: JoinAlias
+    joinJoinAlias :: JoinAlias,
+    joinWhere :: Where
   }
 
 data JoinSource
@@ -380,7 +386,29 @@ newtype Where
   = Where [Expression]
 
 newtype With
-  = With (NonEmpty (Aliased Select))
+  = With (NonEmpty (Aliased CTEBody))
+  deriving (Semigroup)
+
+-- | Something that can appear in a CTE body.
+data CTEBody
+  = CTESelect Select
+  | CTEUnsafeRawSQL (InterpolatedQuery Expression)
+
+-- | Extra query steps that can be emitted from the main
+-- query to do things like setup temp tables
+data TempTableDDL
+  = -- | create a temp table
+    TempTableCreate TempTableName [UnifiedColumn]
+  | -- | insert output of a statement into a temp table
+    TempTableInsert TempTableName [Declare] (InterpolatedQuery Expression)
+  | -- | Drop a temp table
+    TempTableDrop TempTableName
+
+data Declare = Declare
+  { dName :: Text,
+    dType :: ScalarType,
+    dValue :: Expression
+  }
 
 data Top
   = NoTop
@@ -432,14 +460,16 @@ data JsonPath
   | IndexPath JsonPath Integer
 
 data Aggregate
-  = CountAggregate (Countable FieldName)
+  = CountAggregate (Countable Expression)
   | OpAggregate Text [Expression]
   | TextAggregate Text
 
+newtype CountType field = CountType {getCountType :: Countable (ColumnName, AnnRedactionExp 'MSSQL field)}
+
 data Countable name
   = StarCountable
-  | NonNullFieldCountable (NonEmpty name)
-  | DistinctCountable (NonEmpty name)
+  | NonNullFieldCountable name
+  | DistinctCountable name
 
 deriving instance Functor Countable
 
@@ -450,29 +480,35 @@ data From
   | FromIdentifier Text
   | FromTempTable (Aliased TempTableName)
 
+-- | Extract the name bound in a 'From' clause as an 'EntityAlias'.
+fromAlias :: From -> EntityAlias
+fromAlias (FromQualifiedTable Aliased {aliasedAlias}) = EntityAlias aliasedAlias
+fromAlias (FromOpenJson Aliased {aliasedAlias}) = EntityAlias aliasedAlias
+fromAlias (FromSelect Aliased {aliasedAlias}) = EntityAlias aliasedAlias
+fromAlias (FromIdentifier identifier) = EntityAlias identifier
+fromAlias (FromTempTable Aliased {aliasedAlias}) = EntityAlias aliasedAlias
+
 data OpenJson = OpenJson
   { openJsonExpression :: Expression,
     openJsonWith :: Maybe (NonEmpty JsonFieldSpec)
   }
 
 data JsonFieldSpec
-  = IntField Text (Maybe JsonPath)
+  = ScalarField ScalarType DataLength Text (Maybe JsonPath)
   | JsonField Text (Maybe JsonPath)
   | StringField Text (Maybe JsonPath)
-  | UuidField Text (Maybe JsonPath)
 
 data Aliased a = Aliased
   { aliasedThing :: a,
     aliasedAlias :: Text
   }
 
-newtype SchemaName = SchemaName
-  { schemaNameParts :: [Text]
-  }
+newtype SchemaName = SchemaName {_unSchemaName :: Text}
+  deriving (Show, Eq, Ord, Data, J.ToJSON, J.FromJSON, NFData, Generic, IsString, Hashable, Lift)
 
 data TableName = TableName
   { tableName :: Text,
-    tableSchema :: Text
+    tableSchema :: SchemaName
   }
 
 data FieldName = FieldName
@@ -485,6 +521,10 @@ data Comment = DueToPermission | RequestedSingleObject
 newtype EntityAlias = EntityAlias
   { entityAliasText :: Text
   }
+
+columnNameToFieldName :: ColumnName -> EntityAlias -> FieldName
+columnNameToFieldName (ColumnName fieldName) EntityAlias {entityAliasText = fieldNameEntity} =
+  FieldName {fieldName, fieldNameEntity}
 
 data Op
   = LT
@@ -511,6 +551,21 @@ data SpatialOp
 -- | Column name of some database table -- this differs to FieldName
 -- that is used for referring to things within a query.
 newtype ColumnName = ColumnName {columnNameText :: Text}
+
+newtype ConstraintName = ConstraintName {constraintNameText :: Text}
+  deriving newtype (J.FromJSONKey, J.ToJSONKey)
+
+data FunctionName = FunctionName
+  { functionName :: Text,
+    functionSchema :: SchemaName
+  }
+
+-- | type for a query generated from IR along with any DDL actions
+data QueryWithDDL a = QueryWithDDL
+  { qwdBeforeSteps :: [TempTableDDL],
+    qwdQuery :: a,
+    qwdAfterSteps :: [TempTableDDL]
+  }
 
 -- | Derived from the odbc package.
 data ScalarType
@@ -539,8 +594,8 @@ data ScalarType
   | GeometryType
   | UnknownType Text
 
-scalarTypeDBName :: ScalarType -> Text
-scalarTypeDBName = \case
+scalarTypeDBName :: DataLength -> ScalarType -> Text
+scalarTypeDBName dataLength = \case
   CharType -> "char"
   NumericType -> "numeric"
   DecimalType -> "decimal"
@@ -550,14 +605,14 @@ scalarTypeDBName = \case
   RealType -> "real"
   DateType -> "date"
   Ss_time2Type -> "time"
-  VarcharType -> "varchar"
+  VarcharType -> "varchar" <> fromDataLength dataLength
   WcharType -> "nchar"
-  WvarcharType -> "nvarchar"
+  WvarcharType -> "nvarchar" <> fromDataLength dataLength
   WtextType -> "ntext"
   TextType -> "text"
   TimestampType -> "timestamp"
   BinaryType -> "binary"
-  VarbinaryType -> "varbinary"
+  VarbinaryType -> "varbinary" <> fromDataLength dataLength
   BigintType -> "bigint"
   TinyintType -> "tinyint"
   BitType -> "bit"
@@ -567,33 +622,73 @@ scalarTypeDBName = \case
   -- the input form for types that aren't explicitly supported is a string
   UnknownType t -> t
 
-mkMSSQLScalarTypeName :: MonadError QErr m => ScalarType -> m G.Name
+fromDataLength :: DataLength -> Text
+fromDataLength = \case
+  DataLengthUnspecified -> ""
+  DataLengthInt len -> "(" <> tshow len <> ")"
+  DataLengthMax -> "(max)"
+
+mkMSSQLScalarTypeName :: (MonadError QErr m) => ScalarType -> m G.Name
 mkMSSQLScalarTypeName = \case
-  CharType -> pure RQL.stringScalar
-  WcharType -> pure RQL.stringScalar
-  WvarcharType -> pure RQL.stringScalar
-  VarcharType -> pure RQL.stringScalar
-  WtextType -> pure RQL.stringScalar
-  TextType -> pure RQL.stringScalar
-  FloatType -> pure RQL.floatScalar
+  CharType -> pure GName._String
+  WcharType -> pure GName._String
+  WvarcharType -> pure GName._String
+  VarcharType -> pure GName._String
+  WtextType -> pure GName._String
+  TextType -> pure GName._String
+  FloatType -> pure GName._Float
   -- integer types
-  IntegerType -> pure RQL.intScalar
+  IntegerType -> pure GName._Int
   -- boolean type
-  BitType -> pure RQL.boolScalar
+  BitType -> pure GName._Boolean
   scalarType ->
-    G.mkName (scalarTypeDBName scalarType)
+    G.mkName (scalarTypeDBName DataLengthUnspecified scalarType)
       `onNothing` throw400
         ValidationFailed
-        ( "cannot use SQL type " <> scalarTypeDBName scalarType <> " in the GraphQL schema because its name is not a "
+        ( "cannot use SQL type "
+            <> scalarTypeDBName DataLengthUnspecified scalarType
+            <> " in the GraphQL schema because its name is not a "
             <> "valid GraphQL identifier"
         )
 
+parseScalarType :: Text -> ScalarType
+parseScalarType = \case
+  "char" -> CharType
+  "numeric" -> NumericType
+  "decimal" -> DecimalType
+  "money" -> DecimalType
+  "smallmoney" -> DecimalType
+  "int" -> IntegerType
+  "smallint" -> SmallintType
+  "float" -> FloatType
+  "real" -> RealType
+  "date" -> DateType
+  "time" -> Ss_time2Type
+  "varchar" -> VarcharType
+  "nchar" -> WcharType
+  "nvarchar" -> WvarcharType
+  "ntext" -> WtextType
+  "timestamp" -> TimestampType
+  "text" -> TextType
+  "binary" -> BinaryType
+  "bigint" -> BigintType
+  "tinyint" -> TinyintType
+  "varbinary" -> VarbinaryType
+  "bit" -> BitType
+  "uniqueidentifier" -> GuidType
+  "geography" -> GeographyType
+  "geometry" -> GeometryType
+  t ->
+    -- if the type is something like `varchar(127)`, try stripping off the data length
+    if T.isInfixOf "(" t
+      then parseScalarType (T.takeWhile (\c -> c /= '(') t)
+      else UnknownType t
+
 parseScalarValue :: ScalarType -> J.Value -> Either QErr Value
 parseScalarValue scalarType jValue = case scalarType of
-  -- bytestring
-  CharType -> ODBC.ByteStringValue . encodeUtf8 <$> parseJValue jValue
-  VarcharType -> ODBC.ByteStringValue . encodeUtf8 <$> parseJValue jValue
   -- text
+  CharType -> ODBC.TextValue <$> parseJValue jValue
+  VarcharType -> ODBC.TextValue <$> parseJValue jValue
   TextType -> ODBC.TextValue <$> parseJValue jValue
   WcharType -> ODBC.TextValue <$> parseJValue jValue
   WvarcharType -> ODBC.TextValue <$> parseJValue jValue
@@ -633,7 +728,8 @@ parseScalarValue scalarType jValue = case scalarType of
     parseGeoJSONAsWKT :: J.Value -> Either QErr Text
     parseGeoJSONAsWKT jv =
       runAesonParser (J.parseJSON @Geo.GeometryWithCRS) jv
-        >>= fmap WKT.getWKT . WKT.toWKT
+        >>= fmap WKT.getWKT
+        . WKT.toWKT
 
 isComparableType, isNumType :: ScalarType -> Bool
 isComparableType = \case
@@ -655,16 +751,35 @@ isNumType = \case
 
 getGQLTableName :: TableName -> Either QErr G.Name
 getGQLTableName tn = do
-  let textName = snakeCaseTableName tn
-  onNothing (G.mkName $ snakeCaseTableName tn) $
-    throw400 ValidationFailed $
-      "cannot include " <> textName <> " in the GraphQL schema because it is not a valid GraphQL identifier"
+  let textName = snakeCaseName (tableName tn) (tableSchema tn)
+  onNothing (G.mkName textName)
+    $ throw400 ValidationFailed
+    $ "cannot include "
+    <> textName
+    <> " in the GraphQL schema because it is not a valid GraphQL identifier"
 
-snakeCaseTableName :: TableName -> Text
-snakeCaseTableName TableName {tableName, tableSchema} =
+getGQLFunctionName :: FunctionName -> Either QErr G.Name
+getGQLFunctionName fn = do
+  let textName = snakeCaseName (functionName fn) (functionSchema fn)
+  onNothing (G.mkName textName)
+    $ throw400 ValidationFailed
+    $ "cannot include "
+    <> textName
+    <> " in the GraphQL schema because it is not a valid GraphQL identifier"
+
+snakeCaseName :: Text -> SchemaName -> Text
+snakeCaseName tableName (SchemaName tableSchema) =
   if tableSchema == "dbo"
     then tableName
     else tableSchema <> "_" <> tableName
+
+getTableIdentifier :: TableName -> Either QErr GQLNameIdentifier
+getTableIdentifier tName = do
+  gqlTableName <- getGQLTableName tName
+  pure $ C.fromAutogeneratedName gqlTableName
+
+namingConventionSupport :: SupportedNamingCase
+namingConventionSupport = OnlyHasuraCase
 
 stringTypes :: [ScalarType]
 stringTypes =

@@ -223,7 +223,7 @@ class TestV1SelectBoolExpJSONB:
     def dir(cls):
         return 'queries/v1/select/boolexp/jsonb'
 
-@usefixtures('per_class_tests_db_state')
+@usefixtures('postgis', 'per_class_tests_db_state')
 class TestV1SelectBoolExpPostGIS:
 
     def test_query_st_equals(self, hge_ctx):
@@ -263,7 +263,7 @@ class TestV1SelectBoolExpPostGIS:
     def dir(cls):
         return 'queries/v1/select/boolexp/postgis'
 
-@usefixtures('per_class_tests_db_state')
+@usefixtures('postgis', 'per_class_tests_db_state')
 class TestV1SelectPermissions:
 
     def test_user_select_unpublished_articles(self, hge_ctx):
@@ -649,6 +649,7 @@ class TestCreatePermission:
         return "queries/v1/permissions"
 
 # All these tests fail. So it should be fine to not have a cleanup after tests
+@pytest.mark.hge_env('EVENT_WEBHOOK_HEADER', 'MyEnvValue')
 class TestNonEmptyText:
 
     def test_create_event_trigger(self, hge_ctx):
@@ -690,6 +691,9 @@ class TestSetTableIsEnum:
 
     def test_relationship_with_inconsistent_enum_table(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + '/relationship_with_inconsistent_enum_table.yaml')
+
+    def test_custom_enum_table_name(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + '/custom_enum_table_name.yaml')
 
 # regression test for issue #3759
 @usefixtures('per_method_tests_db_state')
@@ -756,6 +760,9 @@ class TestSetTableCustomization:
 
     def test_conflicting_custom_table_name(self, hge_ctx):
         check_query_f(hge_ctx, self.dir() + "/fail_conflicting_custom_table_name.yaml")
+
+    def test_use_deprecated_custom_column_names(self, hge_ctx):
+        check_query_f(hge_ctx, self.dir() + "/use_deprecated_custom_column_names.yaml")
 
 @usefixtures('per_method_tests_db_state')
 class TestComputedFields:

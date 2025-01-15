@@ -1,0 +1,7 @@
+{
+  "label": "GraphQL Schema",
+  "position": 31,
+  "customProps": {
+    "sidebar_pathname": "schema"
+  }
+}

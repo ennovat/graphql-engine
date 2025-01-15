@@ -1,15 +1,15 @@
 package inheritedroles
 
 import (
-	"io/ioutil"
 	"path/filepath"
 
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
 	"github.com/hasura/graphql-engine/cli/v2/internal/metadataobject"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/hasura/graphql-engine/cli/v2"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 type InheritedRolesConfig struct {
@@ -35,68 +35,52 @@ func (ir *InheritedRolesConfig) CreateFiles() error {
 	return nil
 }
 
-func (ir *InheritedRolesConfig) Build(metadata *yaml.MapSlice) metadataobject.ErrParsingMetadataObject {
-	data, err := ioutil.ReadFile(filepath.Join(ir.MetadataDir, ir.Filename()))
+func (ir *InheritedRolesConfig) Build() (map[string]interface{}, error) {
+	var op errors.Op = "inheritedroles.InheritedRolesConfig.Build"
+	data, err := metadataobject.ReadMetadataFile(filepath.Join(ir.MetadataDir, ir.Filename()))
 	if err != nil {
-		return ir.error(err)
+		return nil, errors.E(op, ir.error(err))
 	}
-	item := yaml.MapItem{
-		Key:   "inherited_roles",
-		Value: []yaml.MapSlice{},
-	}
-	err = yaml.Unmarshal(data, &item.Value)
+	var obj []yaml.Node
+	err = yaml.Unmarshal(data, &obj)
 	if err != nil {
-		return ir.error(err)
+		return nil, errors.E(op, errors.KindBadInput, ir.error(err))
 	}
-	*metadata = append(*metadata, item)
-	return nil
+	return map[string]interface{}{ir.Key(): obj}, nil
 }
 
-func (ir *InheritedRolesConfig) Export(metadata yaml.MapSlice) (map[string][]byte, metadataobject.ErrParsingMetadataObject) {
-	var inheritedRoles interface{}
-	for _, item := range metadata {
-		k, ok := item.Key.(string)
-		if !ok || k != "inherited_roles" {
-			continue
-		}
-		inheritedRoles = item.Value
-	}
-	if inheritedRoles == nil {
-		ir.logger.WithFields(logrus.Fields{
-			"reason": "not found in metadata",
-		}).Debugf("skipped building %s", ir.Key())
-		return nil, nil
-	}
-	data, err := yaml.Marshal(inheritedRoles)
+func (ir *InheritedRolesConfig) Export(metadata map[string]yaml.Node) (map[string][]byte, error) {
+	var op errors.Op = "inheritedroles.InheritedRolesConfig.Export"
+	b, err := metadataobject.DefaultExport(ir, metadata, ir.error, metadataobject.DefaultObjectTypeSequence)
 	if err != nil {
-		return nil, ir.error(err)
+		return nil, errors.E(op, err)
 	}
-	return map[string][]byte{
-		filepath.ToSlash(filepath.Join(ir.MetadataDir, ir.Filename())): data,
-	}, nil
+	return b, nil
 }
 
 func (ir *InheritedRolesConfig) Key() string {
-	return "inherited_roles"
+	return metadataobject.InheritedRolesKey
 }
 
 func (ir *InheritedRolesConfig) Filename() string {
 	return "inherited_roles.yaml"
 }
 
-func (ir *InheritedRolesConfig) GetFiles() ([]string, metadataobject.ErrParsingMetadataObject) {
+func (ir *InheritedRolesConfig) GetFiles() ([]string, error) {
+	var op errors.Op = "inheritedroles.InheritedRolesConfig.GetFiles"
 	rootFile := filepath.Join(ir.BaseDirectory(), ir.Filename())
 	files, err := metadataobject.DefaultGetFiles(rootFile)
 	if err != nil {
-		return nil, ir.error(err)
+		return nil, errors.E(op, ir.error(err))
 	}
 	return files, nil
 }
 
-func (ir *InheritedRolesConfig) WriteDiff(opts metadataobject.WriteDiffOpts) metadataobject.ErrParsingMetadataObject {
+func (ir *InheritedRolesConfig) WriteDiff(opts metadataobject.WriteDiffOpts) error {
+	var op errors.Op = "inheritedroles.InheritedRolesConfig.WriteDiff"
 	err := metadataobject.DefaultWriteDiff(metadataobject.DefaultWriteDiffOpts{From: ir, WriteDiffOpts: opts})
 	if err != nil {
-		return ir.error(err)
+		return errors.E(op, ir.error(err))
 	}
 	return nil
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_checkIfDirectoryIsMigration(t *testing.T) {
@@ -25,10 +26,11 @@ func Test_checkIfDirectoryIsMigration(t *testing.T) {
 		dirPath string
 	}
 	tests := []struct {
-		name    string
-		args    args
-		want    bool
-		wantErr bool
+		name      string
+		args      args
+		want      bool
+		wantErr   bool
+		assertErr require.ErrorAssertionFunc
 	}{
 		{
 			"can check if a directory name is a valid migration",
@@ -37,6 +39,7 @@ func Test_checkIfDirectoryIsMigration(t *testing.T) {
 			},
 			true,
 			false,
+			require.NoError,
 		},
 		{
 			"can check if a directory name is a valid migration",
@@ -45,6 +48,7 @@ func Test_checkIfDirectoryIsMigration(t *testing.T) {
 			},
 			true,
 			false,
+			require.NoError,
 		},
 		{
 			"can check if a directory name is a valid migration",
@@ -53,13 +57,32 @@ func Test_checkIfDirectoryIsMigration(t *testing.T) {
 			},
 			false,
 			false,
+			require.NoError,
+		},
+		{
+			"can check if a directory name is a valid migration, 14 chars",
+			args{
+				dirPath: "16048559649031_test",
+			},
+			true,
+			false,
+			require.NoError,
+		},
+		{
+			"can check if a directory name is a valid migration, 15 chars",
+			args{
+				dirPath: "160485596490312_test",
+			},
+			false,
+			false,
+			require.NoError,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := isHasuraCLIGeneratedMigration(tt.args.dirPath)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("getMigrationDirectoryNames() error = %v, wantErr %v", err, tt.wantErr)
+			tt.assertErr(t, err)
+			if tt.wantErr {
 				return
 			}
 			assert.Equal(t, tt.want, got)
@@ -73,10 +96,11 @@ func Test_getMigrationDirectoryNames(t *testing.T) {
 		rootMigrationsDir string
 	}
 	tests := []struct {
-		name    string
-		args    args
-		want    []string
-		wantErr bool
+		name      string
+		args      args
+		want      []string
+		wantErr   bool
+		assertErr require.ErrorAssertionFunc
 	}{
 		{
 			"can get list of migration directories",
@@ -106,13 +130,14 @@ func Test_getMigrationDirectoryNames(t *testing.T) {
 				"1604855964903_test2",
 			},
 			false,
+			require.NoError,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := getMigrationDirectoryNames(tt.args.fs, tt.args.rootMigrationsDir)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("getMigrationDirectoryNames() error = %v, wantErr %v", err, tt.wantErr)
+			tt.assertErr(t, err)
+			if tt.wantErr {
 				return
 			}
 			assert.Equal(t, tt.want, got)
@@ -128,10 +153,11 @@ func Test_moveMigrationsToDatabaseDirectory(t *testing.T) {
 		target                    string
 	}
 	tests := []struct {
-		name    string
-		args    args
-		wantErr bool
-		want    []string
+		name      string
+		args      args
+		want      []string
+		wantErr   bool
+		assertErr require.ErrorAssertionFunc
 	}{
 		{
 			"can move directories to directory",
@@ -157,14 +183,17 @@ func Test_moveMigrationsToDatabaseDirectory(t *testing.T) {
 				parentMigrationsDirectory: ".",
 				target:                    "moved",
 			},
-			false,
 			[]string{"moved/1", "moved/2", "moved/3"},
+			false,
+			require.NoError,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := copyMigrations(tt.args.fs, tt.args.dirs, tt.args.parentMigrationsDirectory, tt.args.target); (err != nil) != tt.wantErr {
-				assert.NoError(t, err)
+			err := copyMigrations(tt.args.fs, tt.args.dirs, tt.args.parentMigrationsDirectory, tt.args.target)
+			tt.assertErr(t, err)
+			if tt.wantErr {
+				return
 			}
 			for _, want := range tt.want {
 				_, err := tt.args.fs.Stat(want)
@@ -181,9 +210,10 @@ func Test_removeDirectories(t *testing.T) {
 		dirs            []string
 	}
 	tests := []struct {
-		name    string
-		args    args
-		wantErr bool
+		name      string
+		args      args
+		wantErr   bool
+		assertErr require.ErrorAssertionFunc
 	}{
 		{
 			"can delete directories",
@@ -205,12 +235,15 @@ func Test_removeDirectories(t *testing.T) {
 				parentDirectory: ".",
 			},
 			false,
+			require.NoError,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := removeDirectories(tt.args.fs, tt.args.parentDirectory, tt.args.dirs); (err != nil) != tt.wantErr {
-				t.Errorf("removeDirectories() error = %v, wantErr %v", err, tt.wantErr)
+			err := removeDirectories(tt.args.fs, tt.args.parentDirectory, tt.args.dirs)
+			tt.assertErr(t, err)
+			if tt.wantErr {
+				return
 			}
 			for _, d := range tt.args.dirs {
 				_, err := tt.args.fs.Stat(d)
@@ -228,9 +261,10 @@ func Test_copyState(t *testing.T) {
 		destdatabase string
 	}
 	tests := []struct {
-		name    string
-		args    args
-		wantErr bool
+		name      string
+		args      args
+		wantErr   bool
+		assertErr require.ErrorAssertionFunc
 	}{
 		{
 			"can move state",
@@ -250,6 +284,7 @@ func Test_copyState(t *testing.T) {
 				"test",
 			},
 			false,
+			require.NoError,
 		},
 	}
 	for _, tt := range tests {
@@ -263,8 +298,10 @@ func Test_copyState(t *testing.T) {
 			dstMigrations := migrations.NewCatalogStateStore(statestore.NewCLICatalogState(tt.args.ec.APIClient.V1Metadata))
 			assert.NoError(t, srcSettings.UpdateSetting("test", "test"))
 			assert.NoError(t, srcMigrations.SetVersion("", 123, false))
-			if err := CopyState(tt.args.ec, "default", tt.args.destdatabase); (err != nil) != tt.wantErr {
-				t.Fatalf("CopyState() error = %v, wantErr %v", err, tt.wantErr)
+			err := CopyState(tt.args.ec, "default", tt.args.destdatabase)
+			tt.assertErr(t, err)
+			if tt.wantErr {
+				return
 			}
 			v, err := dstSettings.GetSetting("test")
 			assert.NoError(t, err)

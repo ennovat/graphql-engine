@@ -1,57 +1,92 @@
+-- | Postgres Types BoolExp
+--
+-- Postgres-specific 'BooleanOperator' extensions.
 module Hasura.Backends.Postgres.Types.BoolExp
-  ( BooleanOperators (AAncestor, AAncestorAny, AContainedIn, AContains, ADescendant, ADescendantAny, AHasKey, AHasKeysAll, AHasKeysAny, AILIKE, AIREGEX, AMatches, AMatchesAny, AMatchesFulltext, ANILIKE, ANIREGEX, ANREGEX, ANSIMILAR, AREGEX, ASIMILAR, AST3DDWithinGeom, AST3DIntersects, ASTContains, ASTCrosses, ASTDWithinGeog, ASTDWithinGeom, ASTEquals, ASTIntersects, ASTIntersectsGeomNband, ASTIntersectsNbandGeom, ASTIntersectsRast, ASTOverlaps, ASTTouches, ASTWithin),
+  ( BooleanOperators
+      ( AAncestor,
+        AAncestorAny,
+        AContainedIn,
+        AContains,
+        ADescendant,
+        ADescendantAny,
+        AHasKey,
+        AHasKeysAll,
+        AHasKeysAny,
+        AILIKE,
+        AIREGEX,
+        AMatches,
+        AMatchesAny,
+        AMatchesFulltext,
+        ANILIKE,
+        ANIREGEX,
+        ANREGEX,
+        ANSIMILAR,
+        AREGEX,
+        ASIMILAR,
+        AST3DDWithinGeom,
+        AST3DIntersects,
+        ASTContains,
+        ASTCrosses,
+        ASTDWithinGeog,
+        ASTDWithinGeom,
+        ASTEquals,
+        ASTIntersects,
+        ASTIntersectsGeomNband,
+        ASTIntersectsNbandGeom,
+        ASTIntersectsRast,
+        ASTOverlaps,
+        ASTTouches,
+        ASTWithin
+      ),
   )
 where
 
 import Data.Aeson.Extended
-import Hasura.Incremental (Cacheable)
 import Hasura.Prelude
 import Hasura.RQL.IR.BoolExp
 
 data BooleanOperators a
-  = AILIKE !a --     ILIKE, case insensitive
-  | ANILIKE !a -- NOT ILIKE, case insensitive
-  | ASIMILAR !a --     similar, regex
-  | ANSIMILAR !a -- not similar, regex
-  | AREGEX !a -- regex: match POSIX case sensitive
-  | AIREGEX !a -- regex: match POSIX case insensitive
-  | ANREGEX !a -- regex: dont match POSIX case sensitive
-  | ANIREGEX !a -- regex: dont match POSIX case insensitive
-  | AContains !a
-  | AContainedIn !a
-  | AHasKey !a
-  | AHasKeysAny !a
-  | AHasKeysAll !a
-  | ASTContains !a
-  | ASTCrosses !a
-  | ASTEquals !a
-  | ASTIntersects !a
-  | AST3DIntersects !a
-  | ASTOverlaps !a
-  | ASTTouches !a
-  | ASTWithin !a
-  | ASTIntersectsRast !a
-  | ASTDWithinGeom !(DWithinGeomOp a)
-  | AST3DDWithinGeom !(DWithinGeomOp a)
-  | ASTDWithinGeog !(DWithinGeogOp a)
-  | ASTIntersectsGeomNband !(STIntersectsGeomminNband a)
-  | ASTIntersectsNbandGeom !(STIntersectsNbandGeommin a)
-  | AAncestor !a
-  | AAncestorAny !a
-  | ADescendant !a
-  | ADescendantAny !a
-  | AMatches !a
-  | AMatchesAny !a
-  | AMatchesFulltext !a
+  = AILIKE a --     ILIKE, case insensitive
+  | ANILIKE a -- NOT ILIKE, case insensitive
+  | ASIMILAR a --     similar, regex
+  | ANSIMILAR a -- not similar, regex
+  | AREGEX a -- regex: match POSIX case sensitive
+  | AIREGEX a -- regex: match POSIX case insensitive
+  | ANREGEX a -- regex: dont match POSIX case sensitive
+  | ANIREGEX a -- regex: dont match POSIX case insensitive
+  | AContains a
+  | AContainedIn a
+  | AHasKey a
+  | AHasKeysAny a
+  | AHasKeysAll a
+  | ASTContains a
+  | ASTCrosses a
+  | ASTEquals a
+  | ASTIntersects a
+  | AST3DIntersects a
+  | ASTOverlaps a
+  | ASTTouches a
+  | ASTWithin a
+  | ASTIntersectsRast a
+  | ASTDWithinGeom (DWithinGeomOp a)
+  | AST3DDWithinGeom (DWithinGeomOp a)
+  | ASTDWithinGeog (DWithinGeogOp a)
+  | ASTIntersectsGeomNband (STIntersectsGeomminNband a)
+  | ASTIntersectsNbandGeom (STIntersectsNbandGeommin a)
+  | AAncestor a
+  | AAncestorAny a
+  | ADescendant a
+  | ADescendantAny a
+  | AMatches a
+  | AMatchesAny a
+  | AMatchesFulltext a
   deriving stock (Eq, Generic, Foldable, Functor, Traversable, Show)
 
-instance NFData a => NFData (BooleanOperators a)
+instance (NFData a) => NFData (BooleanOperators a)
 
-instance Hashable a => Hashable (BooleanOperators a)
+instance (Hashable a) => Hashable (BooleanOperators a)
 
-instance Cacheable a => Cacheable (BooleanOperators a)
-
-instance ToJSON a => ToJSONKeyValue (BooleanOperators a) where
+instance (ToJSON a) => ToJSONKeyValue (BooleanOperators a) where
   toJSONKeyValue = \case
     AILIKE a -> ("_ilike", toJSON a)
     ANILIKE a -> ("_nilike", toJSON a)

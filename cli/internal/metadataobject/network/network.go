@@ -4,12 +4,13 @@ import (
 	"io/ioutil"
 	"path/filepath"
 
+	"github.com/hasura/graphql-engine/cli/v2/internal/errors"
 	"github.com/hasura/graphql-engine/cli/v2/internal/metadataobject"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/hasura/graphql-engine/cli/v2"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 type NetworkObject struct {
@@ -30,84 +31,69 @@ func (o *NetworkObject) Validate() error {
 }
 
 func (o *NetworkObject) CreateFiles() error {
+	var op errors.Op = "network.NetworkObject.CreateFiles"
 	v := make([]interface{}, 0)
 	data, err := yaml.Marshal(v)
 	if err != nil {
-		return err
+		return errors.E(op, err)
 	}
 	err = ioutil.WriteFile(filepath.Join(o.MetadataDir, o.Filename()), data, 0644)
 	if err != nil {
-		return err
+		return errors.E(op, err)
 	}
 	return nil
 }
 
-func (o *NetworkObject) Build(metadata *yaml.MapSlice) metadataobject.ErrParsingMetadataObject {
-	data, err := ioutil.ReadFile(filepath.Join(o.MetadataDir, o.Filename()))
+type networkObject struct {
+	TLSAllowlist yaml.Node `yaml:"tls_allowlist,omitempty"`
+}
+
+func (o *NetworkObject) Build() (map[string]interface{}, error) {
+	var op errors.Op = "network.NetworkObject.Build"
+	data, err := metadataobject.ReadMetadataFile(filepath.Join(o.MetadataDir, o.Filename()))
 	if err != nil {
-		return o.error(err)
+		return nil, errors.E(op, o.error(err))
 	}
-	item := yaml.MapItem{
-		Key: o.Key(),
-	}
-	var obj yaml.MapSlice
+	var obj networkObject
 	err = yaml.Unmarshal(data, &obj)
 	if err != nil {
-		return o.error(err)
+		return nil, errors.E(op, errors.KindBadInput, o.error(err))
 	}
-	if len(obj) > 0 {
-		item.Value = obj
-		*metadata = append(*metadata, item)
-	}
-	return nil
+	return map[string]interface{}{o.Key(): obj}, nil
 }
 
-func (o *NetworkObject) Export(metadata yaml.MapSlice) (map[string][]byte, metadataobject.ErrParsingMetadataObject) {
-	var network interface{}
-	for _, item := range metadata {
-		k, ok := item.Key.(string)
-		if !ok || k != o.Key() {
-			continue
-		}
-		network = item.Value
-	}
-	if network == nil {
-		o.logger.WithFields(logrus.Fields{
-			"object": o.Key(),
-			"reason": "not found in metadata",
-		}).Debugf("skipped building %s", o.Key())
-		return nil, nil
-	}
-	data, err := yaml.Marshal(network)
+func (o *NetworkObject) Export(metadata map[string]yaml.Node) (map[string][]byte, error) {
+	var op errors.Op = "network.NetworkObject.Export"
+	b, err := metadataobject.DefaultExport(o, metadata, o.error, metadataobject.DefaultObjectTypeMapping)
 	if err != nil {
-		return nil, o.error(err)
+		return nil, errors.E(op, err)
 	}
-	return map[string][]byte{
-		filepath.ToSlash(filepath.Join(o.MetadataDir, o.Filename())): data,
-	}, nil
+	return b, nil
 }
 
 func (o *NetworkObject) Key() string {
-	return "network"
+	return metadataobject.NetworkKey
 }
 
 func (o *NetworkObject) Filename() string {
 	return "network.yaml"
 }
 
-func (o *NetworkObject) GetFiles() ([]string, metadataobject.ErrParsingMetadataObject) {
+func (o *NetworkObject) GetFiles() ([]string, error) {
+	var op errors.Op = "network.NetworkObject.GetFiles"
 	rootFile := filepath.Join(o.BaseDirectory(), o.Filename())
 	files, err := metadataobject.DefaultGetFiles(rootFile)
 	if err != nil {
-		return nil, o.error(err)
+		return nil, errors.E(op, o.error(err))
 	}
 	return files, nil
 }
 
-func (o *NetworkObject) WriteDiff(opts metadataobject.WriteDiffOpts) metadataobject.ErrParsingMetadataObject {
+func (o *NetworkObject) WriteDiff(opts metadataobject.WriteDiffOpts) error {
+	var op errors.Op = "network.NetworkObject.WriteDiff"
 	err := metadataobject.DefaultWriteDiff(metadataobject.DefaultWriteDiffOpts{From: o, WriteDiffOpts: opts})
 	if err != nil {
-		return o.error(err)
+		return errors.E(op, o.error(err))
 	}
 	return nil
 }

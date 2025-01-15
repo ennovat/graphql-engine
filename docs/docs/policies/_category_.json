@@ -1,0 +1,7 @@
+{
+  "label": "Hasura Policies",
+  "position": 103,
+  "customProps": {
+    "sidebar_pathname": "policies"
+  }
+}

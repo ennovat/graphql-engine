@@ -1,22 +1,58 @@
-import requests
 import pytest
-from context import PytestConf
+import requests
+from time import perf_counter, sleep
 
-if not PytestConf.config.getoption("--test-jwk-url"):
-    pytest.skip("--test-jwk-url flag is missing, skipping tests", allow_module_level=True)
+pytestmark = [
+    pytest.mark.admin_secret
+]
 
-# assumes the JWK server is running on 127.0.0.1:5001
+def wait_until_request_count_reaches(num_requests: int, state_key: str, timeout_secs: int, jwk_server_url: str) -> float:
+    start_time = perf_counter()
+    requests.post(jwk_server_url + '/reset-state')
+    request_count = 0
+    time_elapsed = 0
 
-def test_cache_control_header(hge_ctx):
-    print(hge_ctx)
-    resp = requests.get('http://localhost:5001/state')
-    state = resp.json()
-    print(state)
-    assert(state['cache-control'] > 0)
+    while request_count < num_requests:
+        time_elapsed = perf_counter() - start_time
+        if time_elapsed > timeout_secs:
+            raise Exception(f'Waited {time_elapsed} seconds for {state_key} JWK requests to reach {num_requests}. Only received {request_count}.')
 
-def test_expires_header(hge_ctx):
-    print(hge_ctx)
-    resp = requests.get('http://localhost:5001/state')
-    state = resp.json()
-    print(state)
-    assert(state['expires'] > 0)
+        sleep(0.2)
+        state = requests.get(jwk_server_url + '/state').json()
+        request_count = state[state_key]
+
+    return time_elapsed
+
+@pytest.mark.jwk_path('/jwk-cache-control?max-age=3')
+def test_cache_control_header_max_age(jwk_server_url: str):
+    time_elapsed = wait_until_request_count_reaches(num_requests=1, state_key='cache-control', timeout_secs=70, jwk_server_url=jwk_server_url)
+    print(f"time_elapsed: {time_elapsed}")
+
+@pytest.mark.jwk_path('/jwk-cache-control?max-age=3&must-revalidate=true')
+def test_cache_control_header_max_age_must_revalidate(jwk_server_url: str):
+    time_elapsed = wait_until_request_count_reaches(num_requests=1, state_key='cache-control', timeout_secs=70, jwk_server_url=jwk_server_url)
+    print(f"time_elapsed: {time_elapsed}")
+
+@pytest.mark.jwk_path('/jwk-cache-control?must-revalidate=true')
+def test_cache_control_header_must_revalidate(jwk_server_url: str):
+    time_elapsed = wait_until_request_count_reaches(num_requests=3, state_key='cache-control', timeout_secs=190, jwk_server_url=jwk_server_url)
+    print(f"time_elapsed: {time_elapsed}")
+    assert(time_elapsed >= 2)
+
+@pytest.mark.jwk_path('/jwk-cache-control?no-cache=true&public=true')
+def test_cache_control_header_no_cache_public(jwk_server_url: str):
+    time_elapsed = wait_until_request_count_reaches(num_requests=2, state_key='cache-control', timeout_secs=130, jwk_server_url=jwk_server_url)
+    print(f"time_elapsed: {time_elapsed}")
+    assert(time_elapsed >= 2)
+
+@pytest.mark.jwk_path('/jwk-cache-control?no-store=true&max-age=3')
+def test_cache_control_header_no_store_max_age(jwk_server_url: str):
+    time_elapsed = wait_until_request_count_reaches(num_requests=3, state_key='cache-control', timeout_secs=190, jwk_server_url=jwk_server_url)
+    print(f"time_elapsed: {time_elapsed}")
+    assert(time_elapsed >= 2)
+
+@pytest.mark.jwk_path('/jwk-expires?seconds=3')
+def test_expires_header(jwk_server_url: str):
+    # The test uses a three second jwk expiry so we are expecting one request
+    time_elapsed = wait_until_request_count_reaches(num_requests=1, state_key='expires', timeout_secs=70, jwk_server_url=jwk_server_url)
+    print(f"time_elapsed: {time_elapsed}")
