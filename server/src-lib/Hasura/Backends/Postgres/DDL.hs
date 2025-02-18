@@ -1,3 +1,8 @@
+-- | Postgres DDL
+--
+-- Implements the DDL related methods of the 'Hasura.RQL.Types.Metadata.Backend.BackendMetadata'
+-- type class for the Postgres backend, which provides an interface for fetching information about
+-- the objects in the database, such as tables, relationships, etc.
 module Hasura.Backends.Postgres.DDL
   ( parseCollectableType,
     module M,
@@ -5,9 +10,10 @@ module Hasura.Backends.Postgres.DDL
 where
 
 import Data.Aeson
+import Hasura.Authentication.Session (SessionVariable, isSessionVariable, unsafeMkSessionVariable, userIdHeader)
 import Hasura.Backends.Postgres.DDL.BoolExp as M
+import Hasura.Backends.Postgres.DDL.ComputedField as M
 import Hasura.Backends.Postgres.DDL.EventTrigger as M
-import Hasura.Backends.Postgres.DDL.Field as M
 import Hasura.Backends.Postgres.DDL.Function as M
 import Hasura.Backends.Postgres.DDL.Source as M
 import Hasura.Backends.Postgres.DDL.Table as M
@@ -18,11 +24,10 @@ import Hasura.Base.Error
 import Hasura.Prelude
 import Hasura.RQL.IR.BoolExp
 import Hasura.RQL.Types.Backend
+import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Column
-import Hasura.SQL.Backend
 import Hasura.SQL.Types
-import Hasura.Server.Utils
-import Hasura.Session
+import Hasura.Server.Utils (isReqUserId)
 
 parseCollectableType ::
   forall pgKind m.
@@ -33,17 +38,18 @@ parseCollectableType ::
 parseCollectableType pgType = \case
   -- When it is a special variable
   String t
-    | isSessionVariable t -> return $ mkTypedSessionVar pgType $ mkSessionVariable t
-    | isReqUserId t -> return $ mkTypedSessionVar pgType userIdHeader
+    | isSessionVariable t -> pure . mkTypedSessionVar pgType $ unsafeMkSessionVariable t
+    | isReqUserId t -> pure $ mkTypedSessionVar pgType userIdHeader
   -- Typical value as Aeson's value
   val -> case pgType of
     CollectableTypeScalar cvType ->
-      PSESQLExp . toTxtValue . ColumnValue cvType <$> parseScalarValueColumnType cvType val
+      PSESQLExp . toTxtValue . ColumnValue cvType <$> parseScalarValueColumnTypeWithContext () cvType val
     CollectableTypeArray ofType -> do
       vals <- runAesonParser parseJSON val
-      scalarValues <- parseScalarValuesColumnType ofType vals
-      return . PSESQLExp $
-        SETyAnn
+      scalarValues <- parseScalarValuesColumnTypeWithContext () ofType vals
+      return
+        . PSESQLExp
+        $ SETyAnn
           (SEArray $ map (toTxtValue . ColumnValue ofType) scalarValues)
           (mkTypeAnn $ CollectableTypeArray (unsafePGColumnToBackend ofType))
 

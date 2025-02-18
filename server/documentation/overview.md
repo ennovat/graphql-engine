@@ -1,9 +1,12 @@
-## Table of contents
+# Overview
+
+### Table of contents
 
 <!--
 Please make sure you update the table of contents when modifying this file. If
-you're using emacs, you can automatically do so using the command mentioned in
-the generated comment below (provided by the package markdown-toc).
+you're using emacs, you can generate a default version of it with `M-x
+markdown-toc-refresh-toc` (provided by the package markdown-toc), and then edit
+it for readability.
 -->
 
 <!-- markdown-toc start - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
@@ -170,7 +173,7 @@ schema from our metadata. The folder itself contains all the individual
 components of our schema: how to construct a parser for a table's selection set,
 for a remote schema's input arguments, and so on. It's in the root file,
 `Hasura/GraphQL/Schema.hs`, that they're all put together to build the schema;
-see more information about this in our [schema documentation](schema.md).
+see more information about this in our [schema documentation](deep-dives/schema.md).
 
 #### Hasura.GraphQL.Execute
 

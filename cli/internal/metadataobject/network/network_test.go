@@ -4,12 +4,13 @@ import (
 	"io/ioutil"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	goyaml "github.com/goccy/go-yaml"
+	"github.com/hasura/graphql-engine/cli/v2/internal/metadatautil"
 
 	"github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestMetadataObject_Build(t *testing.T) {
@@ -17,34 +18,35 @@ func TestMetadataObject_Build(t *testing.T) {
 		MetadataDir string
 		logger      *logrus.Logger
 	}
-	type args struct {
-		metadata *yaml.MapSlice
-	}
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    string
-		wantErr bool
+		id         string
+		name       string
+		fields     fields
+		wantGolden string
+		wantErr    bool
+		assertErr  require.ErrorAssertionFunc
 	}{
 		{
+			"t1",
 			"can build from file",
 			fields{
-				MetadataDir: "testdata/metadata",
+				MetadataDir: "testdata/build_test/t1/metadata",
 				logger:      logrus.New(),
 			},
-			args{
-				metadata: new(yaml.MapSlice),
-			}, `
-network:
-  tls_allowlist:
-   - certtest.dev.hasura.io
-   - host: certtest.dev.hasura.io
-     port: 443
-     permit:
-      - self-signed
-`,
+			"testdata/build_test/t1/want.golden.json",
 			false,
+			require.NoError,
+		},
+		{
+			"t2",
+			"can build from an empty file",
+			fields{
+				MetadataDir: "testdata/build_test/t2/metadata",
+				logger:      logrus.New(),
+			},
+			"testdata/build_test/t2/want.golden.json",
+			false,
+			require.NoError,
 		},
 	}
 	for _, tt := range tests {
@@ -53,15 +55,22 @@ network:
 				MetadataDir: tt.fields.MetadataDir,
 				logger:      tt.fields.logger,
 			}
-			err := m.Build(tt.args.metadata)
+			got, err := m.Build()
+			tt.assertErr(t, err)
 			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				b, err := yaml.Marshal(tt.args.metadata)
-				assert.NoError(t, err)
-				yamlBytes := []byte(tt.want)
-				assert.YAMLEq(t, string(yamlBytes), string(b))
+				return
 			}
+			gotbs, err := yaml.Marshal(got)
+			assert.NoError(t, err)
+			jsonbs, err := goyaml.YAMLToJSON(gotbs)
+			assert.NoError(t, err)
+
+			// uncomment following lines to update golden file
+			//assert.NoError(t, ioutil.WriteFile(tt.wantGolden, jsonbs, os.ModePerm))
+
+			wantbs, err := ioutil.ReadFile(tt.wantGolden)
+			assert.NoError(t, err)
+			assert.Equal(t, string(wantbs), string(jsonbs))
 		})
 	}
 }
@@ -72,40 +81,44 @@ func TestMetadataObject_Export(t *testing.T) {
 		logger      *logrus.Logger
 	}
 	type args struct {
-		metadata yaml.MapSlice
+		metadata map[string]yaml.Node
 	}
 	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		want    map[string][]byte
-		wantErr bool
+		id        string
+		name      string
+		fields    fields
+		args      args
+		want      map[string][]byte
+		wantErr   bool
+		assertErr require.ErrorAssertionFunc
 	}{
 		{
+			"t1",
 			"can export metadata with network object",
 			fields{
 				MetadataDir: "testdata/metadata",
 				logger:      logrus.New(),
 			},
 			args{
-				metadata: func() yaml.MapSlice {
-					var metadata yaml.MapSlice
-					jsonb, err := ioutil.ReadFile("testdata/metadata.json")
+				metadata: func() map[string]yaml.Node {
+					bs, err := ioutil.ReadFile("testdata/export_test/t1/metadata.json")
 					assert.NoError(t, err)
-					assert.NoError(t, yaml.Unmarshal(jsonb, &metadata))
-					return metadata
+					yamlbs, err := metadatautil.JSONToYAML(bs)
+					assert.NoError(t, err)
+					var v map[string]yaml.Node
+					assert.NoError(t, yaml.Unmarshal(yamlbs, &v))
+					return v
 				}(),
 			},
 			map[string][]byte{
-				"testdata/metadata/network.yaml": []byte(`tls_allowlist:
-- certtest.dev.hasura.io
-- host: certtest.dev.hasura.io
-  port: 443
-  permit:
-  - self-signed
-`),
+				"testdata/metadata/network.yaml": func() []byte {
+					bs, err := ioutil.ReadFile("testdata/export_test/t1/want.network.yaml")
+					assert.NoError(t, err)
+					return bs
+				}(),
 			},
 			false,
+			require.NoError,
 		},
 	}
 	for _, tt := range tests {
@@ -115,22 +128,15 @@ func TestMetadataObject_Export(t *testing.T) {
 				logger:      tt.fields.logger,
 			}
 			got, err := obj.Export(tt.args.metadata)
+			tt.assertErr(t, err)
 			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-				var wantContent = map[string]string{}
-				var gotContent = map[string]string{}
-				for k, v := range got {
-					gotContent[k] = string(v)
-				}
-				for k, v := range tt.want {
-					wantContent[k] = string(v)
-				}
-				assert.NoError(t, err)
-				if diff := cmp.Diff(wantContent, gotContent); diff != "" {
-					t.Errorf("Export() mismatch (-want +got):\n%s", diff)
-				}
+				return
+			}
+			for k, v := range got {
+				assert.Contains(t, tt.want, k)
+				// uncomment to update golden files
+				//assert.NoError(t, ioutil.WriteFile(fmt.Sprintf("testdata/export_test/%v/want.%v", tt.id, filepath.Base(k)), v, os.ModePerm))
+				assert.Equalf(t, string(tt.want[k]), string(v), "%v", k)
 			}
 		})
 	}

@@ -67,8 +67,8 @@ Utilisez l'un des [kits de démarrage déclencheur serverless](../community/boil
 Déclenchez des notifications push et des emails à partir d'évènements de la base de données. Essayez la démo et les tutoriels ci-dessous pour voir comment les notifications push du navigateur sont déclenchées lorsque l'utilisateur insère de la donnée:
 
 * [Regardez la démo](https://www.youtube.com/watch?v=nuSHkzE2-zo)
-* [Essayez la](https://serverless-push.demo.hasura.app/)
-* [Tutoriel](../community/sample-apps/serverless-push)
+* [Essayez la](https://serverless-push.demo.hasura.io/)
+* [Tutoriel](https://github.com/hasura/sample-apps/tree/main/serverless-push)
 
 
 <!--
@@ -87,8 +87,8 @@ Convertissez de la logique métier complexe, à exécution prolongée en logique
 Transformez et chargez de la donnée dans des data-stores externes. Allez voir cette démo et le tutoriel ci-dessous pour voir comment la donnée Postgres est transformée pour constuire et remplir un index Algolia:
 
 * [Regardez la démo](https://youtu.be/kWVEBWdEVAA)
-* [Essayez la](https://serverless-etl.demo.hasura.app/)
-* [Tutoriel](../community/sample-apps/serverless-etl)
+* [Essayez la](https://serverless-etl.demo.hasura.io/)
+* [Tutoriel](https://github.com/hasura/sample-apps/tree/main/serverless-etl)
 
 ### Construction d'UX réactive pour votre backend asynchrone avec une API GraphQL temps-réel
 

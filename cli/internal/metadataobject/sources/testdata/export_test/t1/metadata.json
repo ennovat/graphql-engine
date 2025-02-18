@@ -1,0 +1,246 @@
+{
+  "version": 3,
+  "sources": [
+    {
+      "name": "default",
+      "kind": "postgres",
+      "tables": [
+        {
+          "table": {
+            "schema": "public",
+            "name": "t1"
+          },
+          "insert_permissions": [
+            {
+              "role": "user",
+              "permission": {
+                "check": {
+                  "id": {
+                    "_eq": "X-Hasura-User-Id"
+                  }
+                },
+                "columns": [],
+                "backend_only": false
+              }
+            }
+          ],
+          "event_triggers": [
+            {
+              "name": "artists",
+              "definition": {
+                "enable_manual": false,
+                "insert": {
+                  "columns": "*"
+                },
+                "update": {
+                  "columns": "*"
+                }
+              },
+              "retry_conf": {
+                "num_retries": 0,
+                "interval_sec": 10,
+                "timeout_sec": 60
+              },
+              "webhook": "https://httpbin.org/post",
+              "request_transform": {
+                "body": "{\n  \"table\": {\n    \"name\": {{$body.table.name}},\n    \"schema\": {{$body.table.schema}}\n  }\n}",
+                "content_type": "application/json",
+                "method": "PUT",
+                "query_params": {},
+                "template_engine": "Kriti"
+              }
+            }
+          ]
+        },
+        {
+          "table": {
+            "schema": "public",
+            "name": "t2"
+          }
+        }
+      ],
+      "functions": [
+        {
+          "function": {
+            "schema": "public",
+            "name": "get_t1"
+          },
+          "some_amazing_stuff": {
+            "test1": "test",
+            "test2": "test"
+          },
+          "xyz_test": {
+            "test1": "test",
+            "test2": "test"
+          }
+        },
+        {
+          "function": {
+            "schema": "public",
+            "name": "get_t2"
+          }
+        },
+        {
+          "function": ["test1", "test2"]
+        }
+      ],
+      "logical_models": [
+       {
+        "name": "quiz_answer",
+        "fields": {
+         "added_by_user_id": {
+          "nullable": false,
+          "type": "integer"
+         },
+         "answer": {
+          "nullable": false,
+          "type": "text"
+         },
+         "question": {
+          "nullable": false,
+          "type": "text"
+         }
+        },
+        "select_permissions": [
+         {
+          "permission": {
+           "columns": [
+            "question",
+            "answer"
+           ],
+           "filter": {
+            "added_by_user_id": {
+             "_eq": "X-Hasura-User-ID"
+            }
+           }
+          },
+          "role": "editor"
+         },
+         {
+          "permission": {
+           "columns": [
+            "question"
+           ],
+           "filter": {}
+          },
+          "role": "user"
+         }
+        ]
+       },
+       {
+        "name": "nonsense",
+        "fields": {
+         "something": {
+          "nullable": false,
+          "type": "integer"
+         },
+         "something_else": {
+          "nullable": false,
+          "type": "text"
+         }
+        }
+       }
+      ],
+      "native_queries": [
+       {
+        "arguments": {
+         "unused": {
+          "description": "An integer argument that we completely ignore",
+          "nullable": true,
+          "type": "integer"
+         }
+        },
+        "code": "select question, answer, added_by_user_id from questions",
+        "returns": "quiz_answer",
+        "root_field_name": "quiz_answers"
+       }
+      ],
+      "stored_procedures": [
+       {
+        "stored_procedure": {
+         "schema": "public",
+         "name": "swap"
+        },
+        "configuration": {
+         "custom_name": "swap_it",
+         "exposed_as": "query"
+        },
+        "arguments": {
+         "one": {
+          "nullable": false,
+          "type": "text"
+         },
+         "two": {
+          "nullable": false,
+          "type": "integer"
+         }
+        },
+        "returns": "nonsense"
+       }
+      ],
+      "configuration": {
+        "connection_info": {
+          "database_url": {
+            "from_env": "HASURA_GRAPHQL_DATABASE_URL"
+          },
+          "isolation_level": "read-committed",
+          "pool_settings": {
+            "retries": 1,
+            "idle_timeout": 180,
+            "max_connections": 50
+          },
+          "use_prepared_statements": true
+        }
+      },
+      "query_tags": {
+        "disabled": false,
+        "format": "standard"
+      },
+      "customization": {
+        "type_names": null,
+        "root_fields": {
+          "suffix": null,
+          "prefix": null,
+          "namespace": "mynamespace"
+        }
+      },
+      "health_check": {
+        "interval": 10,
+        "retries": 3,
+        "test": {
+          "sql": "SELECT 1"
+        },        
+        "timeout": 5
+      }
+    },
+    {
+      "name": "bg",
+      "kind": "bigquery",
+      "tables": [
+        {
+          "table": {
+            "dataset": "london_cycles",
+            "name": "cycle_hire"
+          }
+        },
+        {
+          "table": {
+            "dataset": "london_cycles",
+            "name": "cycle_stations"
+          }
+        }
+      ],
+      "configuration": {
+        "service_account": {
+          "project_id": "some_test",
+          "client_email": "some_email",
+          "private_key": "the private key"
+        },
+        "project_id": "test_id",
+        "datasets": [
+          "t1"
+        ]
+      }
+    }
+  ]
+}

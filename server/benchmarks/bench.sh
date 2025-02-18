@@ -31,7 +31,13 @@ EOL
 exit 1
 }
 
-[ ! -d "benchmark_sets/${1-}" ] && die_usage
+# Dependencies:
+if ! command -v jq &> /dev/null
+then
+    echo "Please install 'jq'" >&2; exit 1
+fi
+
+{ [ -z "${1-}" ] || [ ! -d "benchmark_sets/${1-}" ]; } && die_usage
 BENCH_DIR="$(pwd)/benchmark_sets/$1"
 REQUESTED_HASURA_DOCKER_IMAGE="${2-}"
 # We may wish to sleep after setting up the schema, etc. to e.g. allow memory
@@ -44,7 +50,7 @@ fi
 
 # Make sure we clean up, even if something goes wrong:
 function cleanup {
-  if [ ! -z "${HASURA_CONTAINER_NAME-}" ]; then
+  if [ -n "${HASURA_CONTAINER_NAME-}" ]; then
     echo_pretty "Stopping and removing hasura container"
     docker stop "$HASURA_CONTAINER_NAME" && docker rm "$HASURA_CONTAINER_NAME" \
       || echo "Stopping hasura failed, maybe it never started?"
@@ -56,7 +62,7 @@ function cleanup {
 trap cleanup EXIT
 
 # How can we communicate with localhost from a container?
-if [ $(uname -s) = Darwin ]; then
+if [ "$(uname -s)" = Darwin ]; then
   # Docker for mac:
   LOCALHOST_FROM_CONTAINER=host.docker.internal
   DOCKER_NETWORK_HOST_MODE=""
@@ -79,7 +85,7 @@ if taskset -c 17 sleep 0 ; then
   # run with a pTTY...
   # This is still not great because K6 spits out progress every second or so.
   # TODO maybe combine this stuff into a single are-we-on-ci check / env var
-  K6_DOCKER_t_OR_init="--init"
+  K6_DOCKER_tty_OR_init="--init"
 else
   echo_pretty "CPUs? Running on a puny local machine"
   TASKSET_HASURA=""
@@ -87,7 +93,7 @@ else
   TASKSET_K6=""
   HASURA_RTS=""
 
-  K6_DOCKER_t_OR_init="-t"
+  K6_DOCKER_tty_OR_init="--tty"
 fi
 
 ##################
@@ -176,14 +182,21 @@ CONF_FLAGS=$(echo "$CONF" | sed  -e 's/^/-c /'  | tr '\n' ' ')
 # [2]: https://performance.sunlight.io/postgres/
 function pg_launch_container(){
   echo_pretty "Launching postgres container: $PG_CONTAINER_NAME"
+  # `TASKSET_PG`, `DOCKER_HOST_MODE`, and `CONF_FLAGS` depend on
+  # word-splitting.
+  #
+  # cf. https://github.com/koalaman/shellcheck/wiki/Sc2086
+  #
+  # shellcheck disable=SC2086
   $TASKSET_PG docker run \
-    --mount type=tmpfs,destination=/var/lib/postgresql/data \
+    --detach \
     --name "$PG_CONTAINER_NAME" \
-    -p 127.0.0.1:"$PG_PORT":$PG_PORT \
+    --mount type=tmpfs,destination=/var/lib/postgresql/data \
+    --publish 127.0.0.1:"$PG_PORT":"$PG_PORT" \
     --expose="$PG_PORT" \
-    -e POSTGRES_PASSWORD="$PG_PASSWORD" \
+    --env POSTGRES_PASSWORD="$PG_PASSWORD" \
     $DOCKER_NETWORK_HOST_MODE \
-    -d circleci/postgres:11.5-alpine-postgis \
+     circleci/postgres:11.5-alpine-postgis \
     $CONF_FLAGS
 }
 
@@ -198,7 +211,7 @@ function pg_wait() {
 function pg_cleanup(){
   echo_pretty "Removing $PG_CONTAINER_NAME and its volumes"
   docker stop "$PG_CONTAINER_NAME"
-  docker rm -v "$PG_CONTAINER_NAME"
+  docker rm --volumes "$PG_CONTAINER_NAME"
 }
 
 ######################
@@ -211,22 +224,47 @@ HASURA_GRAPHQL_SERVER_PORT=8181
 # FROM a container (in this case graphql-bench):
 HASURA_URL_FROM_CONTAINER="http://$LOCALHOST_FROM_CONTAINER:$HASURA_GRAPHQL_SERVER_PORT"
 # ...and for anything outside a container, just:
-HASURA_URL="http://127.0.0.1:$HASURA_GRAPHQL_SERVER_PORT"
+export HASURA_URL="http://127.0.0.1:$HASURA_GRAPHQL_SERVER_PORT"
 
 # Maybe launch the hasura instance we'll benchmark
 function maybe_launch_hasura_container() {
-  if [ ! -z "$REQUESTED_HASURA_DOCKER_IMAGE" ]; then
+  if [ -n "$REQUESTED_HASURA_DOCKER_IMAGE" ]; then
+    # NOTE!: presence of HASURA_GRAPHQL_EE_LICENSE_KEY will determine if we run
+    # in EE mode or not, and this will happen silently! version doesn't indicate
+    # the mode we're in.
+    if [ -z "${HASURA_GRAPHQL_EE_LICENSE_KEY}" ]; then
+        echo_pretty "Running in OSS mode"
+    else
+        echo_pretty "Running in EE mode"
+        # consistent across scripts/dev.sh and server/benchmarks:
+        export HASURA_GRAPHQL_ADMIN_SECRET=my-secret
+    fi
     HASURA_CONTAINER_NAME="graphql-engine-to-benchmark"
-    $TASKSET_HASURA docker run -d -p 127.0.0.1:$HASURA_GRAPHQL_SERVER_PORT:$HASURA_GRAPHQL_SERVER_PORT \
+    # `TASKSET_HASURA`, `$DOCKER_NETWORK_HOST_MODE`, and `HASURA_RTS` depend on
+    # word-splitting.
+    #
+    # cf. https://github.com/koalaman/shellcheck/wiki/Sc2086
+    #
+    # shellcheck disable=SC2086
+    $TASKSET_HASURA docker run \
+      --detach \
       --name "$HASURA_CONTAINER_NAME" \
-      -e HASURA_GRAPHQL_DATABASE_URL=$PG_DB_URL \
-      -e HASURA_GRAPHQL_ENABLE_CONSOLE=true \
-      -e HASURA_GRAPHQL_SERVER_PORT="$HASURA_GRAPHQL_SERVER_PORT" \
+      --publish 127.0.0.1:"$HASURA_GRAPHQL_SERVER_PORT":"$HASURA_GRAPHQL_SERVER_PORT" \
+      --env HASURA_GRAPHQL_DATABASE_URL="$PG_DB_URL" \
+      --env HASURA_GRAPHQL_ENABLE_CONSOLE=true \
+      --env HASURA_GRAPHQL_SERVER_PORT="$HASURA_GRAPHQL_SERVER_PORT" \
+      --env HASURA_GRAPHQL_ADMIN_SECRET \
+      --env HASURA_GRAPHQL_EE_LICENSE_KEY \
+      --env HASURA_GRAPHQL_EVENTS_FETCH_INTERVAL=0 \
+      --env HASURA_GRAPHQL_SCHEMA_SYNC_POLL_INTERVAL=0 \
       $DOCKER_NETWORK_HOST_MODE \
       "$REQUESTED_HASURA_DOCKER_IMAGE" \
-      graphql-engine serve +RTS -T $HASURA_RTS -RTS
-      # ^^^ We run with `+RTS -T` to expose the /dev/rts_stats endpoint for
+      graphql-engine serve \
+        +RTS -T $HASURA_RTS -RTS
+      # ^^^ - We run with `+RTS -T` to expose the /dev/rts_stats endpoint for
       #     inspecting memory usage stats
+      #     - We disable some unneeded (currently) polling to try to eliminate
+      #     some sources of non-determinism
   else
     echo_pretty "We'll benchmark the hasura instance at port $HASURA_GRAPHQL_SERVER_PORT"
   fi
@@ -234,18 +272,30 @@ function maybe_launch_hasura_container() {
 
 function hasura_wait() {
   # Wait for the graphql-engine under bench to be ready
-  echo -n "Waiting for graphql-engine at $HASURA_URL"
+  wait_time=120
+  echo -n "Waiting for graphql-engine at $HASURA_URL for $wait_time seconds"
   if [ -z "$REQUESTED_HASURA_DOCKER_IMAGE" ]; then
     echo -n " (e.g. from 'dev.sh graphql-engine')"
   fi
+  start_time="$(date +%s)"
   until curl -s "$HASURA_URL/v1/query" &>/dev/null; do
+    if [[ $(( "$(date +%s)" - start_time )) -gt "$wait_time" ]]; then
+      echo
+      echo 'Timed out.'
+      if [ -n "$HASURA_CONTAINER_NAME" ]; then
+        echo 'Container logs:'
+        docker logs -f "$HASURA_CONTAINER_NAME" 2>&1 &
+        docker stop "$HASURA_CONTAINER_NAME" || : >/dev/null
+      fi
+      return 1
+    fi
     echo -n '.' && sleep 0.2
   done
-  echo ""
-  echo " Ok"
+  echo
+  echo ' Ok'
   echo -n "Sleeping for an additional $POST_SETUP_SLEEP_TIME seconds as requested... "
   sleep "$POST_SETUP_SLEEP_TIME"
-  echo " Ok"
+  echo ' Ok'
 }
 
 #####################
@@ -268,20 +318,181 @@ function install_latest_graphql_bench() {
   echo_pretty "Done"
 }
 
-function run_benchmarks() {
-  echo_pretty "Starting benchmarks"
+# graphql-bench -powered benchmarks
+function run_graphql_benchmarks() {
+  echo_pretty "Starting graphql benchmarks"
 
   cd "$BENCH_DIR"
   # This reads config.query.yaml from the current directory, outputting
   # report.json to the same directory
-  $TASKSET_K6 docker run $DOCKER_NETWORK_HOST_MODE -v "$PWD":/app/tmp -i $K6_DOCKER_t_OR_init \
+  $TASKSET_K6 docker run \
+    --interactive \
+    --volume "$PWD":/app/tmp \
+    $DOCKER_NETWORK_HOST_MODE \
+    $K6_DOCKER_tty_OR_init \
     graphql-bench-ci query \
-    --config="./tmp/config.query.yaml" \
-    --outfile="./tmp/report.json" --url "$HASURA_URL_FROM_CONTAINER/v1/graphql"
+      --config="./tmp/config.query.yaml" \
+      --outfile="./tmp/report.json" \
+      --url "$HASURA_URL_FROM_CONTAINER/v1/graphql"
 
   echo_pretty "Done. Report at $PWD/report.json"
   cd -
 }
+
+# adhoc script-based benchmarks (more flexible, but less reporting).
+function run_adhoc_operation_benchmarks() (
+  cd "$BENCH_DIR"
+  # Filenames should look like <operation_name>.sh
+  reg=".*\.sh"
+  # Collect any adhoc operations, else skip silently
+  scripts=$(find "adhoc_operations" -maxdepth 1 -executable -type f -regextype sed -regex "$reg" 2>/dev/null ) || return 0
+  [ -z "$scripts" ] && return 0
+
+  echo_pretty "Running adhoc operations for $BENCH_DIR..."
+
+  # sanity check:
+  if [ ! -f report.json ]; then
+      echo "Bug: Somehow a report from graphql-engine isn't present! Exiting"
+      exit 43
+  fi
+
+  # NOTE: This loops over each word in `$scripts` with globbing.
+  for script in $scripts; do
+      # The script must define a function named "adhoc_operation" which we
+      # execute multiple times below. This gives more flexibility and is maybe
+      # faster. It also must define 'iterations' indicating the number of
+      # iterations to execute here.
+      unset -f adhoc_operation
+      unset iterations
+
+      # shellcheck disable=SC1090
+      . "$script"
+      if [[ $(type -t adhoc_operation) != function ]]; then
+          echo "Error: $script must define a function named 'adhoc_operation'! Exiting." >&2; exit 1
+      fi
+
+      # shellcheck disable=SC2154
+      if ! [[ "$iterations" =~ ^[0-9]+$ ]] ; then
+          echo "Error: $script must define 'iterations'" >&2; exit 1
+      fi
+      # shellcheck disable=SC2154
+      if ! [[ "$pause_after_seconds" =~ ^[0-9]+$ ]] ; then
+          echo "Error: $script must define 'pause_after_seconds'" >&2; exit 1
+      fi
+
+      # TODO I was relying on being able to also get 'mutator_cpu_ns' to get a
+      # stable metric of CPU usage (like counting instructions with 'perf').
+      # Unfortunately that metric is fubar
+      # (https://gitlab.haskell.org/ghc/ghc/-/issues/21082). Trying to use perf
+      # will be a pain, might require root, means this script won't work over a
+      # network, etc...
+      live_bytes_before=$(curl "$HASURA_URL/dev/rts_stats" 2>/dev/null | jq '.gc.gcdetails_live_bytes')
+      mem_in_use_bytes_before=$(curl "$HASURA_URL/dev/rts_stats" 2>/dev/null | jq '.gc.gcdetails_mem_in_use_bytes')
+      allocated_bytes_before=$(curl "$HASURA_URL/dev/rts_stats" 2>/dev/null | jq '.allocated_bytes')
+ 
+      IFS="./" read -r -a script_name_parts <<< "$script"
+      name=${script_name_parts[1]}
+
+      # Space separated list of nanosecond timings
+      latencies_ns=""
+      # Select an item from latencies_ns at the percentile requested, this
+      # never takes the mean of two samples.
+      rough_percentile() {
+          echo "$latencies_ns" |\
+              tr ' ' '\n' | sort -n |\
+              awk '{all[NR] = $0} END{print all[int(NR*'"$1"'+0.5)]}' 
+              # ^^^ select a value based on line number, rounding up
+      }
+
+      echo -n "Running $name $iterations time(s)..."
+      for _ in $(seq 1 "$iterations"); do
+         echo -n "."
+         # NOTE: Executing a command like `date` takes about 1 ms in Bash, so
+         # we can't really accurately time operations that are on the order of
+         # single-digit ms
+         time_ns_before=$(date +%s%N)
+         adhoc_operation &> /tmp/hasura_bench_adhoc_last_iteration.out
+         time_ns_after=$(date +%s%N)
+         latencies_ns+=" $((time_ns_after-time_ns_before))"
+      done
+      echo
+
+      # Allowing any asynchronous activity to settle:
+      sleep "$pause_after_seconds"
+
+      allocated_bytes_after=$(curl "$HASURA_URL/dev/rts_stats" 2>/dev/null | jq '.allocated_bytes')
+      mem_in_use_bytes_after=$(curl "$HASURA_URL/dev/rts_stats" 2>/dev/null | jq '.gc.gcdetails_mem_in_use_bytes')
+      live_bytes_after=$(curl "$HASURA_URL/dev/rts_stats" 2>/dev/null | jq '.gc.gcdetails_live_bytes')
+
+      mean_ms=$(echo "$latencies_ns" | jq -s '(add/length)/1000000')
+      min_ms=$(echo "$latencies_ns"  | jq -s 'min/1000000')
+      max_ms=$(echo "$latencies_ns"  | jq -s 'max/1000000')
+      p50_ms=$(rough_percentile 0.50 | jq -s 'min/1000000')
+      p90_ms=$(rough_percentile 0.90 | jq -s 'min/1000000')
+      bytes_allocated_per_request=$(jq -n \("$allocated_bytes_after"-"$allocated_bytes_before"\)/"$iterations")
+
+      echo " Done. For $name, measured $mean_ms ms/op and $bytes_allocated_per_request bytes_allocated/op"
+      echo "Appending to $PWD/report.json..."
+      # NOTE: certain metrics that are difficult to collect or that we don't
+      # care about are set to 0 here, to prevent the graphql-bench web app from
+      # breaking 
+      #
+      # Name these "ADHOC-foo" so we can choose to display them differently,
+      # e.g. in PR regression reports
+      temp_result_file="$(mktemp)"  # ('sponge' unavailable)
+      jq --arg name "$name" \
+         --argjson iterations "$iterations" \
+         --argjson p50_ms "$p50_ms" \
+         --argjson p90_ms "$p90_ms" \
+         --argjson max_ms "$max_ms" \
+         --argjson mean_ms "$mean_ms" \
+         --argjson min_ms "$min_ms" \
+         --argjson bytes_allocated_per_request "$bytes_allocated_per_request" \
+         --argjson live_bytes_before "$live_bytes_before" \
+         --argjson live_bytes_after "$live_bytes_after" \
+         --argjson mem_in_use_bytes_before "$mem_in_use_bytes_before" \
+         --argjson mem_in_use_bytes_after "$mem_in_use_bytes_after" \
+         '. +
+          [{
+            "name": "ADHOC-\($name)",
+            "time": {
+            },
+            "requests": {
+              "count": $iterations,
+              "average": 0
+            },
+            "response": {
+              "totalBytes": 0,
+              "bytesPerSecond": 0
+            },
+            "histogram": {
+              "json": {
+                "p50": $p50_ms,
+                "p90": $p90_ms,
+                "max": $max_ms,
+                "totalCount": $iterations,
+                "mean": $mean_ms,
+                "min": $min_ms,
+                "stdDeviation": 0
+              },
+              "parsedStats": [
+              ]
+            },
+            "extended_hasura_checks": {
+              "bytes_allocated_per_request": $bytes_allocated_per_request,
+              "live_bytes_before": $live_bytes_before,
+              "live_bytes_after": $live_bytes_after,
+              "mem_in_use_bytes_before": $mem_in_use_bytes_before,
+              "mem_in_use_bytes_after": $mem_in_use_bytes_after
+            }
+          }]' < report.json > "$temp_result_file"
+      mv -f "$temp_result_file" report.json
+
+      # TODO once GHC issue 21082 fixed:
+      #  - collect mutator cpu ns
+      #  - add an untrack/track table benchmark to chinook and huge_schema
+  done
+)
 
 function custom_setup() {
   cd "$BENCH_DIR"
@@ -315,7 +526,13 @@ function load_data_and_schema() {
   if [ -f replace_metadata.json ]; then
     # --fail-with-body is what we want, but is not available on older curl:
     # TODO LATER: use /v1/metadata once stable
-    curl --fail -X POST -H "Content-Type: application/json" -d @replace_metadata.json "$HASURA_URL/v1/query"
+    curl \
+      --fail \
+      --request POST \
+      --header "Content-Type: application/json" \
+      --header "X-Hasura-Admin-Secret: my-secret" \
+      --data @replace_metadata.json \
+      "$HASURA_URL/v1/query"
   else
     echo_pretty "No metadata to replace"
   fi
@@ -340,4 +557,10 @@ hasura_wait
 custom_setup
 
 load_data_and_schema
-run_benchmarks
+run_graphql_benchmarks
+run_adhoc_operation_benchmarks
+
+echo_pretty "All done. You can visualize the report using the web app here:"
+echo_pretty "    https://hasura.github.io/graphql-bench/app/web-app/"
+echo_pretty "...and passing it the file we just generated:"
+echo_pretty "    $BENCH_DIR/report.json"

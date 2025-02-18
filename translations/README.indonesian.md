@@ -41,6 +41,7 @@ Baca lebih lanjut di [hasura.io](https://hasura.io) dan [dokumentasinya](https:/
 ## Daftar isi
 <!-- markdown-toc **start** - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
 **Daftar isi**
+
 - [Mulai dengan cepat:](#mulai-dengan-cepat)
   - [Jalankan dengan satu klik di Heroku](#jalankan-dengan-satu-klik-di-heroku)
   - [Pilihan menjalankan aplikasi dengan satu klik lainnya](#pilihan-menjalankan-aplikasi-dengan-satu-klik-lainnya)
@@ -123,24 +124,24 @@ Transformasi data di Postgres atau jalankan logika bisnis untuk menghasilkan set
 
 ## Demo
 
-Coba lihat seluruh contoh aplikasi pada direktori [_community/sample-apps_](../community/sample-apps).
+Coba lihat seluruh contoh aplikasi pada direktori [_hasura/sample-apps_](https://github.com/hasura/sample-apps/tree/main).
 
 ### Aplikasi _realtime_
 
 - Aplikasi _chat_ untuk grup yang dibuat menggunakan React. Termasuk indikator pengetikan, pengguna _online_ & notifikasi pesan baru.
-  - [Coba aplikasinya](https://realtime-chat.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-chat)
-  - [Lihat-lihat API](https://realtime-chat.demo.hasura.app/console)
+  - [Coba aplikasinya](https://realtime-chat.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-chat)
+  - [Lihat-lihat API](https://realtime-chat.demo.hasura.io/console)
 
 - Aplikasi pelacak yang menyiarkan lokasi secara langsung dengan memperlihatkan kendaraan berjalan dengan posisi koordinat GPS yang berubah-ubah pada peta.
-  - [Coba aplikasinya](https://realtime-location-tracking.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-location-tracking)
-  - [Lihat-lihat API](https://realtime-location-tracking.demo.hasura.app/console)
+  - [Coba aplikasinya](https://realtime-location-tracking.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-location-tracking)
+  - [Lihat-lihat API](https://realtime-location-tracking.demo.hasura.io/console)
 
 - Sebuah dasbor _realtime_ untuk meng-agregasi data yang berubah secara terus menerus.
-  - [Coba aplikasinya](https://realtime-poll.demo.hasura.app/)
-  - [Tutorial](../community/sample-apps/realtime-poll)
-  - [Lihat-lihat API](https://realtime-poll.demo.hasura.app/console)
+  - [Coba aplikasinya](https://realtime-poll.demo.hasura.io/)
+  - [Tutorial](https://github.com/hasura/sample-apps/tree/main/realtime-poll)
+  - [Lihat-lihat API](https://realtime-poll.demo.hasura.io/console)
 
 ### Video
 
@@ -172,19 +173,19 @@ Coba lihat [petunjuk berkontribusi](../CONTRIBUTING.md) kami untuk detail lebih 
 Aset merek Hasura (logo, maskot, lencana _powered by_, dll.) dapat ditemukan di direktori [_assets/brand_](../assets/brand). Jangan ragu untuk menggunakannya pada aplikasi/website Anda. Kami akan sangat senang jika Anda menambahkan lencana "_Powered by Hasura_" di aplikasi yang dibangun menggunakan Hasura. ❤️
 
 <div style="display: flex;">
-  <img src="../assets/brand/powered_by_hasura_blue.svg" width="150px"/>
-  <img src="../assets/brand/powered_by_hasura_white.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_darkbg.svg" width="150px"/>
+  <img src="../assets/brand/hasura_logo_primary_lightbg.svg" width="150px"/>
 </div>
 
 ```html
 <!-- Untuk dasar berwarna terang -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_blue.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457032/main-web/hasura_logo_primary_lightbg_n0xhz8.svg" />
 </a>
 
 <!-- Untuk dasar berwarna gelap -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_white.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457033/main-web/hasura_logo_primary_darkbg_nussjm.svg" />
 </a>
 ```
 

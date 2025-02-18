@@ -1,3 +1,5 @@
+{-# LANGUAGE UndecidableInstances #-}
+
 module Hasura.RQL.IR.Root
   ( SourceConfigWith (..),
     RootField (..),
@@ -15,34 +17,42 @@ where
 
 import Data.Aeson.Ordered qualified as JO
 import Data.Kind (Type)
+import Hasura.GraphQL.Execute.Action.Types qualified as EA
 import Hasura.Prelude
+import Hasura.QueryTags.Types qualified as RQL
+import Hasura.RQL.IR.Action
 import Hasura.RQL.IR.Delete
 import Hasura.RQL.IR.Insert
 import Hasura.RQL.IR.RemoteSchema
 import Hasura.RQL.IR.Select
 import Hasura.RQL.IR.Update
-import Hasura.RQL.Types.Action qualified as RQL
+import Hasura.RQL.IR.Value qualified as IR (UnpreparedValue)
 import Hasura.RQL.Types.Backend qualified as RQL
+import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Common qualified as RQL
-import Hasura.RQL.Types.QueryTags qualified as RQL
-import Hasura.RQL.Types.RemoteSchema qualified as RQL
+import Hasura.RemoteSchema.Metadata.Base (RemoteSchemaName)
+import Hasura.RemoteSchema.SchemaCache.Types qualified as RQL
 import Hasura.SQL.AnyBackend qualified as AB
-import Hasura.SQL.Backend
 
 data SourceConfigWith (db :: BackendType -> Type) (b :: BackendType)
   = SourceConfigWith (RQL.SourceConfig b) (Maybe RQL.QueryTagsConfig) (db b)
+
+deriving instance
+  (RQL.Backend b, Show (db b), Show (RQL.SourceConfig b)) =>
+  Show (SourceConfigWith db b)
 
 data RootField (db :: BackendType -> Type) remote action raw where
   RFDB ::
     RQL.SourceName ->
     AB.AnyBackend (SourceConfigWith db) ->
     RootField db remote action raw
-  RFRemote :: remote -> RootField db remote action raw
+  RFRemote :: RemoteSchemaName -> remote -> RootField db remote action raw
   RFAction :: action -> RootField db remote action raw
   RFRaw :: raw -> RootField db remote action raw
+  RFMulti :: [RootField db remote action raw] -> RootField db remote action raw
 
 data MutationDB (b :: BackendType) (r :: Type) v
-  = MDBInsert (AnnInsert b r v)
+  = MDBInsert (AnnotatedInsert b r v)
   | MDBUpdate (AnnotatedUpdateG b r v)
   | MDBDelete (AnnDelG b r v)
   | -- | This represents a VOLATILE function, and is AnnSimpleSelG for easy
@@ -50,15 +60,14 @@ data MutationDB (b :: BackendType) (r :: Type) v
     MDBFunction RQL.JsonAggSelect (AnnSimpleSelectG b r v)
   deriving stock (Generic, Functor, Foldable, Traversable)
 
-data ActionQuery (b :: BackendType) (r :: Type) v
-  = AQQuery !(RQL.AnnActionExecution b r v)
-  | AQAsync !(RQL.AnnActionAsyncQuery b r v)
-  deriving (Functor, Foldable, Traversable)
+data ActionQuery (r :: Type)
+  = AQQuery (AnnActionExecution r)
+  | AQAsync (AnnActionAsyncQuery ('Postgres 'Vanilla) r)
+  deriving stock (Functor, Foldable, Traversable)
 
-data ActionMutation (b :: BackendType) (r :: Type) v
-  = AMSync !(RQL.AnnActionExecution b r v)
-  | AMAsync !RQL.AnnActionMutationAsync
-  deriving (Functor, Foldable, Traversable)
+data ActionMutation (r :: Type)
+  = AMSync (AnnActionExecution r)
+  | AMAsync AnnActionMutationAsync
 
 -- The `db` type argument of @RootField@ expects only one type argument, the backend `b`, as not all
 -- types stored in a RootField will have a second parameter like @QueryDB@ does: they all only have
@@ -68,41 +77,55 @@ data ActionMutation (b :: BackendType) (r :: Type) v
 -- @QueryDBRoot@ and @MutationDBRoot@.
 newtype QueryDBRoot r v b = QDBR (QueryDB b r (v b))
 
+deriving stock instance
+  ( RQL.Backend b,
+    Show r,
+    Show (v b),
+    Show (RQL.AggregationPredicates b (v b)),
+    Show (RQL.BooleanOperators b (v b)),
+    Show (RQL.FunctionArgumentExp b (v b)),
+    Show (RQL.CountType b (v b)),
+    Show (EA.AsyncActionQuerySourceExecution (IR.UnpreparedValue b))
+  ) =>
+  Show (QueryDBRoot r v b)
+
 newtype MutationDBRoot r v b = MDBR (MutationDB b r (v b))
 
 -- | IR of a remote relationship. A remote relationship currently can be to
 -- either a remote schema or a database's table. See RemoteSourceSelect for
 -- explanation on 'vf'.
 data RemoteRelationshipField vf
-  = RemoteSchemaField RemoteSchemaSelect
+  = RemoteSchemaField (RemoteSchemaSelect (RemoteRelationshipField vf))
   | -- | AnyBackend is used here to capture a relationship to an arbitrary target
     RemoteSourceField (AB.AnyBackend (RemoteSourceSelect (RemoteRelationshipField vf) vf))
 
+deriving instance (AB.SatisfiesForAllBackends vf Show) => Show (RemoteRelationshipField vf)
+
 -- | Represents a query root field to an action
 type QueryActionRoot v =
-  ActionQuery ('Postgres 'Vanilla) (RemoteRelationshipField v) (v ('Postgres 'Vanilla))
+  ActionQuery (RemoteRelationshipField v)
 
 -- | Represents a mutation root field to an action
 type MutationActionRoot v =
-  ActionMutation ('Postgres 'Vanilla) (RemoteRelationshipField v) (v ('Postgres 'Vanilla))
+  ActionMutation (RemoteRelationshipField v)
 
 type QueryRootField v =
   RootField
     (QueryDBRoot (RemoteRelationshipField v) v)
-    RQL.RemoteField
+    (RemoteSchemaRootField (RemoteRelationshipField v) RQL.RemoteSchemaVariable)
     (QueryActionRoot v)
     JO.Value
 
 type MutationRootField v =
   RootField
     (MutationDBRoot (RemoteRelationshipField v) v)
-    RQL.RemoteField
+    (RemoteSchemaRootField (RemoteRelationshipField v) RQL.RemoteSchemaVariable)
     (MutationActionRoot v)
     JO.Value
 
 type SubscriptionRootField v =
   RootField
     (QueryDBRoot (RemoteRelationshipField v) v)
-    Void
-    Void
-    Void
+    (RemoteSchemaRootField (RemoteRelationshipField v) RQL.RemoteSchemaVariable)
+    (QueryActionRoot v)
+    JO.Value

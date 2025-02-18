@@ -31,8 +31,13 @@ function add_postgres_source() {
 
     echo ""
     echo "Adding Postgres source"
-    curl --fail "$metadata_url" \
-    --data-raw '{"type":"pg_add_source","args":{"name":"default","configuration":{"connection_info":{"database_url":"'"$db_url"'"}}}}'
+    # FIXME: Without a loop here `dev.sh test` fails for me here. With the loop
+    # I get “source with name \"default\" already exists”
+    until curl -s "$metadata_url" \
+        --data-raw '{"type":"pg_add_source","args":{"name":"default","configuration":{"connection_info":{"database_url":"'"$db_url"'"}}}}'; &>/dev/null; do
+      echo -n '.' && sleep 0.2
+    done
+    echo " Ok"
 }
 
 function add_citus_source() {
@@ -74,7 +79,7 @@ function add_bigquery_source() {
     metadata_url=http://127.0.0.1:$hasura_graphql_server_port/v1/metadata
 
     echo ""
-    echo "Adding BigQuery sources"
+    echo "Adding BigQuery sources to project $HASURA_BIGQUERY_PROJECT_ID"
     curl --fail "$metadata_url" \
     --data-raw '
     {
@@ -89,10 +94,10 @@ function add_bigquery_source() {
               "tables": [],
               "configuration": {
                 "service_account": {
-                  "from_env": "HASURA_BIGQUERY_SERVICE_ACCOUNT"
+                  "from_env": "HASURA_BIGQUERY_SERVICE_KEY"
                 },
                 "project_id": { "from_env": "HASURA_BIGQUERY_PROJECT_ID" },
-                "datasets": ["hasura_test"]
+                "datasets": ["hasura"]
               }
             },
             {
@@ -101,10 +106,10 @@ function add_bigquery_source() {
               "tables": [],
               "configuration": {
                 "service_account": {
-                  "from_env": "HASURA_BIGQUERY_SERVICE_ACCOUNT"
+                  "from_env": "HASURA_BIGQUERY_SERVICE_KEY"
                 },
                 "project_id": { "from_env": "HASURA_BIGQUERY_PROJECT_ID" },
-                "datasets": ["hasura_test"]
+                "datasets": ["hasura"]
               }
             },
             {
@@ -114,10 +119,10 @@ function add_bigquery_source() {
               "configuration": {
                 "global_select_limit": 1,
                 "service_account": {
-                  "from_env": "HASURA_BIGQUERY_SERVICE_ACCOUNT"
+                  "from_env": "HASURA_BIGQUERY_SERVICE_KEY"
                 },
                 "project_id": { "from_env": "HASURA_BIGQUERY_PROJECT_ID" },
-                "datasets": ["hasura_test"]
+                "datasets": ["hasura"]
               }
             }
           ]
@@ -125,13 +130,4 @@ function add_bigquery_source() {
       }
     }
     '
-}
-
-function verify_bigquery_pytest_env() {
-    # check that required bigquery environment variables are present
-    if [[ -z "${HASURA_BIGQUERY_SERVICE_ACCOUNT_FILE:-}" || -z "${HASURA_BIGQUERY_PROJECT_ID:-}"  ]]; then
-        echo "HASURA_BIGQUERY_SERVICE_ACCOUNT_FILE and HASURA_BIGQUERY_PROJECT_ID environment variables are needed to run these tests."
-        echo "See https://github.com/hasura/graphql-engine/blob/master/server/py-tests/README.md#running-bigquery-tests for more information."
-        exit 1
-    fi
 }

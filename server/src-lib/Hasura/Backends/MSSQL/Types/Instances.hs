@@ -1,190 +1,235 @@
+{- ORMOLU_DISABLE -}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE CPP #-}
+-- NOTE: This module previously used Template Haskell to generate its instances,
+-- but additional restrictions on Template Haskell splices introduced in GHC 9.0 impose an ordering
+-- on the generated instances that is difficult to satisfy
+-- To avoid these difficulties, we now use CPP.
 
 -- | MSSQL Types Instances
 --
 -- Instances for types from "Hasura.Backends.MSSQL.Types.Internal" that're slow to compile.
 module Hasura.Backends.MSSQL.Types.Instances () where
 
+import Autodocodec (HasCodec (codec), dimapCodec, optionalFieldWithDefault', parseAlternative, requiredField')
+import qualified Autodocodec as AC
 import Data.Aeson.Extended
 import Data.Aeson.Types
 import Data.Text.Extended (ToTxt (..))
-import Database.ODBC.SQLServer qualified as ODBC
+import Data.Time as Time
 import Hasura.Backends.MSSQL.Types.Internal
-import Hasura.Incremental.Internal.Dependency
+import Hasura.Base.ErrorValue qualified as ErrorValue
+import Hasura.Metadata.DTO.Placeholder (placeholderCodecViaJSON)
 import Hasura.Prelude
-import Language.Haskell.TH
 import Language.Haskell.TH.Syntax
+import Hasura.Base.ToErrorValue
+import Hasura.RQL.Types.Backend qualified as Backend
+import Hasura.RQL.Types.BackendType qualified as Backend
 
-$( fmap concat $ for
-     [''Aliased]
-     \name ->
-       [d|
-         deriving instance Generic ($(conT name) a)
+deriving instance Generic (Aliased a)
+instance Hashable a => Hashable (Aliased a)
+deriving instance Eq a => Eq (Aliased a)
+instance NFData a => NFData (Aliased a)
+deriving instance Show a => Show (Aliased a)
+deriving instance Functor Aliased
+deriving instance Data a => Data (Aliased a)
 
-         instance Hashable a => Hashable ($(conT name) a)
 
-         instance Cacheable a => Cacheable ($(conT name) a)
+#define INSTANCE_CLUMP_1(name) \
+         deriving instance Generic name ;\
+         instance Hashable name ;\
+         deriving instance Eq name ;\
+         deriving instance Show name ;\
+         deriving instance Data name ;\
+         instance NFData name ;\
+         instance FromJSON name ;\
+         deriving instance Ord name
+INSTANCE_CLUMP_1(UnifiedTableName)
+INSTANCE_CLUMP_1(UnifiedObjectRelationship)
+INSTANCE_CLUMP_1(UnifiedArrayRelationship)
+INSTANCE_CLUMP_1(UnifiedUsing)
+INSTANCE_CLUMP_1(UnifiedOn)
+INSTANCE_CLUMP_1(UnifiedColumn)
+INSTANCE_CLUMP_1(TempTableName)
+INSTANCE_CLUMP_1(SomeTableName)
+INSTANCE_CLUMP_1(ConstraintName)
 
-         deriving instance Eq a => Eq ($(conT name) a)
 
-         instance NFData a => NFData ($(conT name) a)
+#define INSTANCE_CLUMP_2(name) \
+         deriving instance Generic name ;\
+         instance Hashable name ;\
+         deriving instance Eq name ;\
+         deriving instance Show name ;\
+         deriving instance Data name ;\
+         instance NFData name
+INSTANCE_CLUMP_2(Where)
+INSTANCE_CLUMP_2(For)
+INSTANCE_CLUMP_2(Aggregate)
+INSTANCE_CLUMP_2(EntityAlias)
+INSTANCE_CLUMP_2(ForJson)
+INSTANCE_CLUMP_2(JsonCardinality)
+INSTANCE_CLUMP_2(Root)
+INSTANCE_CLUMP_2(OrderBy)
+INSTANCE_CLUMP_2(JoinAlias)
+INSTANCE_CLUMP_2(Reselect)
+INSTANCE_CLUMP_2(ColumnName)
+INSTANCE_CLUMP_2(DataLength)
+INSTANCE_CLUMP_2(Expression)
+INSTANCE_CLUMP_2(FunctionApplicationExpression)
+INSTANCE_CLUMP_2(MethodApplicationExpression)
+INSTANCE_CLUMP_2(NullsOrder)
+INSTANCE_CLUMP_2(Order)
+INSTANCE_CLUMP_2(ScalarType)
+INSTANCE_CLUMP_2(TableName)
+INSTANCE_CLUMP_2(FunctionName)
+INSTANCE_CLUMP_2(Select)
+INSTANCE_CLUMP_2(With)
+INSTANCE_CLUMP_2(CTEBody)
+INSTANCE_CLUMP_2(Top)
+INSTANCE_CLUMP_2(FieldName)
+INSTANCE_CLUMP_2(JsonPath)
+INSTANCE_CLUMP_2(Op)
+INSTANCE_CLUMP_2(SpatialOp)
+INSTANCE_CLUMP_2(Projection)
+INSTANCE_CLUMP_2(From)
+INSTANCE_CLUMP_2(OpenJson)
+INSTANCE_CLUMP_2(JsonFieldSpec)
+INSTANCE_CLUMP_2(Join)
+INSTANCE_CLUMP_2(JoinSource)
+INSTANCE_CLUMP_2(SelectIntoTempTable)
+INSTANCE_CLUMP_2(SITTConstraints)
+INSTANCE_CLUMP_2(InsertValuesIntoTempTable)
+INSTANCE_CLUMP_2(InsertOutput)
+INSTANCE_CLUMP_2(Inserted)
+INSTANCE_CLUMP_2(OutputColumn)
+INSTANCE_CLUMP_2(TempTable)
+INSTANCE_CLUMP_2(Deleted)
+INSTANCE_CLUMP_2(DeleteOutput)
+INSTANCE_CLUMP_2(Values)
+INSTANCE_CLUMP_2(Delete)
+INSTANCE_CLUMP_2(Insert)
+INSTANCE_CLUMP_2(Merge)
+INSTANCE_CLUMP_2(MergeUsing)
+INSTANCE_CLUMP_2(MergeOn)
+INSTANCE_CLUMP_2(MergeWhenMatched)
+INSTANCE_CLUMP_2(MergeWhenNotMatched)
 
-         deriving instance Show a => Show ($(conT name) a)
+deriving instance Ord TableName
+deriving instance Ord FunctionName
+deriving instance Ord ScalarType
 
-         deriving instance Functor $(conT name)
-
-         deriving instance Data a => Data ($(conT name) a)
-         |]
- )
-
-$( fmap concat $ for
-     [ ''UnifiedTableName,
-       ''UnifiedObjectRelationship,
-       ''UnifiedArrayRelationship,
-       ''UnifiedUsing,
-       ''UnifiedOn,
-       ''UnifiedColumn,
-       ''TempTableName,
-       ''SomeTableName
-     ]
-     \name ->
-       [d|
-         deriving instance Generic $(conT name)
-
-         instance Hashable $(conT name)
-
-         instance Cacheable $(conT name)
-
-         deriving instance Eq $(conT name)
-
-         deriving instance Show $(conT name)
-
-         deriving instance Data $(conT name)
-
-         instance NFData $(conT name)
-
-         instance FromJSON $(conT name)
-
-         deriving instance Ord $(conT name)
-         |]
- )
-
-$( fmap concat $ for
-     [ ''Where,
-       ''For,
-       ''Aggregate,
-       ''EntityAlias,
-       ''ForJson,
-       ''JsonCardinality,
-       ''Root,
-       ''OrderBy,
-       ''JoinAlias,
-       ''Reselect,
-       ''ColumnName,
-       ''DataLength,
-       ''Expression,
-       ''FunctionApplicationExpression,
-       ''MethodApplicationExpression,
-       ''NullsOrder,
-       ''Order,
-       ''ScalarType,
-       ''TableName,
-       ''Select,
-       ''With,
-       ''Top,
-       ''FieldName,
-       ''JsonPath,
-       ''Op,
-       ''SpatialOp,
-       ''Projection,
-       ''From,
-       ''OpenJson,
-       ''JsonFieldSpec,
-       ''Join,
-       ''JoinSource,
-       ''SelectIntoTempTable,
-       ''SITTConstraints,
-       ''InsertValuesIntoTempTable,
-       ''InsertOutput,
-       ''Inserted,
-       ''OutputColumn,
-       ''TempTable,
-       ''Deleted,
-       ''DeleteOutput,
-       ''Values,
-       ''Delete,
-       ''Insert,
-       ''Merge,
-       ''MergeUsing,
-       ''MergeOn,
-       ''MergeWhenMatched,
-       ''MergeWhenNotMatched
-     ]
-     \name ->
-       [d|
-         deriving instance Generic $(conT name)
-
-         instance Hashable $(conT name)
-
-         instance Cacheable $(conT name)
-
-         deriving instance Eq $(conT name)
-
-         deriving instance Show $(conT name)
-
-         deriving instance Data $(conT name)
-
-         instance NFData $(conT name)
-         |]
- )
-
-$( fmap concat $ for
-     [''TableName, ''ScalarType]
-     \name -> [d|deriving instance Ord $(conT name)|]
- )
-
-$( fmap concat $ for
-     [''TableName, ''NullsOrder, ''Order]
-     \name -> [d|deriving instance Lift $(conT name)|]
- )
+deriving instance Lift TableName
+deriving instance Lift FunctionName
+deriving instance Lift NullsOrder
+deriving instance Lift Order
 
 --------------------------------------------------------------------------------
 -- Third-party types
 
-instance Cacheable ODBC.Value
-
-instance Cacheable ODBC.Binary
+deriving instance Generic (Time.TimeZone)
 
 --------------------------------------------------------------------------------
 -- Debug instances
+
+instance ToErrorValue ScalarType where
+  toErrorValue = ErrorValue.squote . tshow
+
+instance ToErrorValue TableName where
+  toErrorValue = ErrorValue.squote . tshow
+
+instance ToErrorValue ConstraintName where
+  toErrorValue = ErrorValue.squote . constraintNameText
+
+instance ToErrorValue ColumnName where
+  toErrorValue = ErrorValue.squote . columnNameText
+
+instance ToErrorValue FunctionName where
+  toErrorValue = ErrorValue.squote . tshow
 
 instance ToTxt ScalarType where
   toTxt = tshow -- TODO: include schema
 
 instance ToTxt TableName where
-  toTxt TableName {tableName, tableSchema} =
+  toTxt (TableName tableName (SchemaName tableSchema)) =
     if tableSchema == "dbo"
       then tableName
       else tableSchema <> "." <> tableName
 
+instance ToTxt FunctionName where
+  toTxt (FunctionName functionName (SchemaName functionSchema)) =
+    if functionSchema == "dbo"
+      then functionName
+      else functionSchema <> "." <> functionName
+
 instance ToTxt ColumnName where
   toTxt = columnNameText
 
-$( fmap concat $ for
-     [''Order, ''NullsOrder, ''ScalarType, ''FieldName]
-     \name ->
-       [d|
-         instance ToJSON $(conT name) where
-           toJSON = genericToJSON hasuraJSON
+instance ToTxt ConstraintName where
+  toTxt = constraintNameText
 
-         instance FromJSON $(conT name) where
-           parseJSON = genericParseJSON hasuraJSON
-         |]
- )
+#define INSTANCE_CLUMP_3(name) \
+         instance ToJSON name where \
+           { toJSON = genericToJSON hasuraJSON } ;\
+         instance FromJSON name where \
+           { parseJSON = genericParseJSON hasuraJSON }
+INSTANCE_CLUMP_3(Order)
+INSTANCE_CLUMP_3(NullsOrder)
+INSTANCE_CLUMP_3(FieldName)
+
+instance ToJSON ScalarType where
+  toJSON scalarType = String $ scalarTypeDBName DataLengthUnspecified scalarType
+
+instance FromJSON ScalarType where
+  parseJSON (String s) = pure (parseScalarType s)
+  parseJSON _ = fail "expected a string"
+
+instance HasCodec ColumnName where
+  codec = dimapCodec ColumnName columnNameText codec
 
 deriving instance FromJSON ColumnName
 
 deriving instance ToJSON ColumnName
+
+deriving instance ToJSON ConstraintName
+
+instance ToJSON FunctionName where
+  toJSON = genericToJSON hasuraJSON
+
+instance HasCodec FunctionName where
+  codec = parseAlternative objCodec strCodec
+    where
+      objCodec =
+        AC.object "MSSQLFunctionName" $
+          FunctionName
+            <$> requiredField' "name" AC..= functionName
+            <*> optionalFieldWithDefault' "schema" "dbo" AC..= functionSchema
+      strCodec = flip FunctionName "dbo" <$> codec
+
+instance FromJSON FunctionName where
+  parseJSON v@(String _) =
+    FunctionName <$> parseJSON v <*> pure "dbo"
+  parseJSON (Object o) =
+    FunctionName
+      <$> o .: "name"
+      <*> o .:? "schema" .!= "dbo"
+  parseJSON _ =
+    fail "expecting a string/object for FunctionName"
+
+instance ToJSONKey FunctionName where
+  toJSONKey = toJSONKeyText $ \(FunctionName name (SchemaName schema)) -> schema <> "." <> name
+
+instance HasCodec TableName where
+  codec = parseAlternative objCodec strCodec
+    where
+      objCodec =
+        AC.object "MSSQLTableName" $
+          TableName
+            <$> requiredField' "name" AC..= tableName
+            <*> optionalFieldWithDefault' "schema" "dbo" AC..= tableSchema
+      strCodec = flip TableName "dbo" <$> codec
+
+instance HasCodec SchemaName where
+  codec = dimapCodec SchemaName _unSchemaName codec
 
 instance FromJSON TableName where
   parseJSON v@(String _) =
@@ -200,7 +245,7 @@ instance ToJSON TableName where
   toJSON = genericToJSON hasuraJSON
 
 instance ToJSONKey TableName where
-  toJSONKey = toJSONKeyText $ \(TableName schema name) -> schema <> "." <> name
+  toJSONKey = toJSONKeyText $ \(TableName name (SchemaName schema)) -> schema <> "." <> name
 
 instance ToJSONKey ScalarType
 
@@ -213,11 +258,17 @@ deriving newtype instance FromJSONKey ColumnName
 --------------------------------------------------------------------------------
 -- Manual instances
 
+deriving instance Generic (CountType n)
+
+
+deriving instance Foldable Countable
+deriving instance Traversable Countable
+
+deriving instance (Backend.Backend 'Backend.MSSQL, Eq n) => Eq (CountType n)
+
 deriving instance Generic (Countable n)
 
 instance Hashable n => Hashable (Countable n)
-
-instance Cacheable n => Cacheable (Countable n)
 
 deriving instance Eq n => Eq (Countable n)
 
@@ -233,11 +284,9 @@ instance FromJSON n => FromJSON (Countable n)
 
 deriving instance Ord ColumnName
 
-instance Monoid Where where
-  mempty = Where mempty
+deriving instance Monoid Where
 
-instance Semigroup Where where
-  (Where x) <> (Where y) = Where (x <> y)
+deriving instance Semigroup Where
 
 instance Monoid Top where
   mempty = NoTop
@@ -258,13 +307,9 @@ deriving instance Traversable BooleanOperators
 
 deriving instance Show a => Show (BooleanOperators a)
 
-deriving instance Eq a => Eq (BooleanOperators a)
-
 instance NFData a => NFData (BooleanOperators a)
 
 instance Hashable a => Hashable (BooleanOperators a)
-
-instance Cacheable a => Cacheable (BooleanOperators a)
 
 instance ToJSON a => ToJSONKeyValue (BooleanOperators a) where
   toJSONKeyValue = \case
@@ -275,3 +320,6 @@ instance ToJSON a => ToJSONKeyValue (BooleanOperators a) where
     ASTOverlaps a -> ("_st_overlaps", toJSON a)
     ASTTouches a -> ("_st_touches", toJSON a)
     ASTWithin a -> ("_st_within", toJSON a)
+
+instance HasCodec ScalarType where
+  codec = AC.named "ScalarType" placeholderCodecViaJSON

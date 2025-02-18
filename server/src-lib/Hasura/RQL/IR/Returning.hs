@@ -1,8 +1,11 @@
-{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Hasura.RQL.IR.Returning
   ( MutFld,
     MutFldG (..),
+    _MCount,
+    _MExp,
+    _MRet,
     MutFlds,
     MutFldsG,
     MutationOutput,
@@ -12,33 +15,59 @@ module Hasura.RQL.IR.Returning
   )
 where
 
+import Control.Lens.TH (makePrisms)
 import Data.Aeson qualified as J
-import Data.HashMap.Strict.InsOrd qualified as OMap
+import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.Kind (Type)
 import Hasura.EncJSON
 import Hasura.Prelude
 import Hasura.RQL.IR.Select
 import Hasura.RQL.Types.Backend
-import Hasura.SQL.Backend
+import Hasura.RQL.Types.BackendType
+import Hasura.RQL.Types.Common
 
 data MutFldG (b :: BackendType) (r :: Type) v
   = MCount
-  | MExp !Text
-  | MRet !(AnnFieldsG b r v)
-  deriving (Functor, Foldable, Traversable)
+  | MExp Text
+  | MRet (AnnFieldsG b r v)
+  deriving stock (Functor, Foldable, Traversable)
 
-deriving instance (Show r, Backend b, Show (BooleanOperators b a), Show a) => Show (MutFldG b r a)
+deriving stock instance
+  ( Backend b,
+    Show v,
+    Show r
+  ) =>
+  Show (MutFldG b r v)
+
+deriving stock instance
+  ( Backend b,
+    Eq r,
+    Eq v
+  ) =>
+  Eq (MutFldG b r v)
 
 type MutFld b = MutFldG b Void (SQLExpression b)
 
 type MutFldsG b r v = Fields (MutFldG b r v)
 
 data MutationOutputG (b :: BackendType) (r :: Type) v
-  = MOutMultirowFields !(MutFldsG b r v)
-  | MOutSinglerowObject !(AnnFieldsG b r v)
+  = MOutMultirowFields (MutFldsG b r v)
+  | MOutSinglerowObject (AnnFieldsG b r v)
   deriving (Functor, Foldable, Traversable)
 
-deriving instance (Show (MutFldsG b r a), Show r, Backend b, Show (BooleanOperators b a), Show a) => Show (MutationOutputG b r a)
+deriving stock instance
+  ( Backend b,
+    Show v,
+    Show r
+  ) =>
+  Show (MutationOutputG b r v)
+
+deriving stock instance
+  ( Backend b,
+    Eq v,
+    Eq r
+  ) =>
+  Eq (MutationOutputG b r v)
 
 type MutationOutput b = MutationOutputG b Void (SQLExpression b)
 
@@ -46,7 +75,7 @@ type MutFlds b = MutFldsG b Void (SQLExpression b)
 
 buildEmptyMutResp :: MutationOutput backend -> EncJSON
 buildEmptyMutResp = \case
-  MOutMultirowFields mutFlds -> encJFromJValue $ OMap.fromList $ map (second convMutFld) mutFlds
+  MOutMultirowFields mutFlds -> encJFromJValue $ InsOrdHashMap.fromList $ map (second convMutFld) mutFlds
   MOutSinglerowObject _ -> encJFromJValue $ J.Object mempty
   where
     convMutFld = \case
@@ -66,3 +95,5 @@ hasNestedFld = \case
       AFObjectRelation _ -> True
       AFArrayRelation _ -> True
       _ -> False
+
+$(makePrisms ''MutFldG)

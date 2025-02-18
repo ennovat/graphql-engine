@@ -26,29 +26,32 @@ module Hasura.RQL.DDL.Schema
 where
 
 import Data.Aeson
-import Data.Aeson.TH
 import Data.Text.Encoding qualified as TE
-import Database.PG.Query qualified as Q
+import Database.PG.Query qualified as PG
 import Database.PostgreSQL.LibPQ qualified as PQ
 import Hasura.Prelude
 import Hasura.RQL.DDL.Schema.Cache as M
 import Hasura.RQL.DDL.Schema.Catalog as M
-import Hasura.RQL.DDL.Schema.Function as M
 import Hasura.RQL.DDL.Schema.Rename as M
-import Hasura.RQL.DDL.Schema.Table as M
+import Hasura.Table.API as M
 
 data RunSQLRes = RunSQLRes
-  { rrResultType :: !Text,
-    rrResult :: !Value
+  { rrResultType :: Text,
+    rrResult :: Value
   }
-  deriving (Show, Eq)
+  deriving (Show, Generic, Eq)
 
-$(deriveJSON hasuraJSON ''RunSQLRes)
+instance FromJSON RunSQLRes where
+  parseJSON = genericParseJSON hasuraJSON
 
-instance Q.FromRes RunSQLRes where
-  fromRes (Q.ResultOkEmpty _) =
+instance ToJSON RunSQLRes where
+  toJSON = genericToJSON hasuraJSON
+  toEncoding = genericToEncoding hasuraJSON
+
+instance PG.FromRes RunSQLRes where
+  fromRes (PG.ResultOkEmpty _) =
     return $ RunSQLRes "CommandOk" Null
-  fromRes (Q.ResultOkData res) = do
+  fromRes (PG.ResultOkData res) = do
     csvRows <- resToCSV res
     return $ RunSQLRes "TuplesOk" $ toJSON csvRows
     where

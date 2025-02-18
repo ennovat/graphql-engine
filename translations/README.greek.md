@@ -126,19 +126,19 @@
 ### Εφαρμογές σε πραγματικό χρόνο
 
 - Μια ομαδική εφαρμογή ανταλλαγής μηνυμάτων που αναπτύχθηκε με το React, συμπεριλαμβανομένων χαρακτηριστικών όπως δείκτη πληκτρολόγησης, ένδειξη ενεργών χρηστών και ειδοποιήσεις νέων μηνυμάτων.
-  - [Δοκιμάστε το](https://realtime-chat.demo.hasura.app/)
+  - [Δοκιμάστε το](https://realtime-chat.demo.hasura.io/)
   - [Tutorial](https://github.com/hasura/graphql-engine/tree/stable/community/sample-apps/realtime-chat)
-  - [Εξερευνήστε APIs](https://realtime-chat.demo.hasura.app/console)
+  - [Εξερευνήστε APIs](https://realtime-chat.demo.hasura.io/console)
 
 - Εφαρμογή εντοπισμού θέσης σε πραγματικό χρόνο που δείχνει όχημα του οποίου οι συντεταγμένες GPS μετακινούνται συνεχώς σε χάρτη.
-  - [Δοκιμάστε το](https://realtime-location-tracking.demo.hasura.app/)
+  - [Δοκιμάστε το](https://realtime-location-tracking.demo.hasura.io/)
   - [Tutorial](https://github.com/hasura/graphql-engine/tree/stable/community/sample-apps/realtime-location-tracking)
-  - [Εξερευνήστε APIs](https://realtime-location-tracking.demo.hasura.app/console)
+  - [Εξερευνήστε APIs](https://realtime-location-tracking.demo.hasura.io/console)
 
 - Πίνακας ελέγχου σε πραγματικό χρόνο για συνεχώς μεταβαλλόμενη συνάθροιση δεδομένων.
-  - [Δοκιμάστε το](https://realtime-poll.demo.hasura.app/)
+  - [Δοκιμάστε το](https://realtime-poll.demo.hasura.io/)
   - [Tutorial](https://github.com/hasura/graphql-engine/tree/stable/community/sample-apps/realtime-poll)
-  - [Εξερευνήστε APIs](https://realtime-poll.demo.hasura.app/console)
+  - [Εξερευνήστε APIs](https://realtime-poll.demo.hasura.io/console)
 
 ### Videos
 
@@ -169,19 +169,18 @@
 Τα στοιχεία μάρκας Hasura (λογότυπα, μασκότ Hasura, "powered by" εμβλήματα κ.λπ.) μπορούν να βρεθούν στον κατάλογο περιουσιακών στοιχείων / μάρκας. Είστε ελεύθεροι να τα χρησιμοποιήσετε στην εφαρμογή / ιστοσελίδα σας κτλ ... Θα χαρούμε να προσθέσετε το σήμα "Powered by Hasura" στην εφαρμογή που αναπτύξατε με την Hasura. ❤️
 
 <div style="display: flex;">
-  <img src="https://github.com/hasura/graphql-engine/blob/stable/assets/brand/powered_by_hasura_blue.svg" width="150px"/>
-  <img src="https://github.com/hasura/graphql-engine/blob/stable/assets/brand/powered_by_hasura_white.svg" width="150px"/>
+  <img src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457032/main-web/hasura_logo_primary_lightbg_n0xhz8.svg" width="150px"/>
 </div>
 
 ```html
 <!-- For light backgrounds -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_blue.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457032/main-web/hasura_logo_primary_lightbg_n0xhz8.svg" />
 </a>
 
 <!-- For dark backgrounds -->
 <a href="https://hasura.io">
-  <img width="150px" src="https://graphql-engine-cdn.hasura.io/img/powered_by_hasura_white.svg" />
+  <img width="150px" src="https://res.cloudinary.com/dh8fp23nd/image/upload/v1711457033/main-web/hasura_logo_primary_darkbg_nussjm.svg" />
 </a>
 ```
 

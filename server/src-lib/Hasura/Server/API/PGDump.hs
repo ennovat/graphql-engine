@@ -12,10 +12,10 @@ import Data.Char (isSpace)
 import Data.List qualified as L
 import Data.Text qualified as T
 import Data.Text.Conversions
-import Database.PG.Query qualified as Q
+import Database.PG.Query qualified as PG
 import Hasura.Base.Error qualified as RTE
 import Hasura.Prelude
-import Hasura.RQL.Types (SourceName, defaultSource)
+import Hasura.RQL.Types.Common
 import System.Exit
 import System.Process
 import Text.Regex.TDFA qualified as TDFA
@@ -30,47 +30,50 @@ data PGDumpReqBody = PGDumpReqBody
 instance FromJSON PGDumpReqBody where
   parseJSON = withObject "Object" $ \o ->
     PGDumpReqBody
-      <$> o .:? "source" .!= defaultSource
-      <*> o .: "opts"
-      <*> o .:? "clean_output" .!= False
+      <$> o
+      .:? "source"
+      .!= defaultSource
+      <*> o
+      .: "opts"
+      <*> o
+      .:? "clean_output"
+      .!= False
 
 execPGDump ::
   (MonadError RTE.QErr m, MonadIO m) =>
   PGDumpReqBody ->
-  Q.ConnInfo ->
+  PG.ConnInfo ->
   m BL.ByteString
 execPGDump b ci = do
-  eOutput <- liftIO $ try execProcess
-  output <- onLeft eOutput throwException
-  onLeft output $ \err ->
-    RTE.throw500 $ "error while executing pg_dump: " <> err
+  eOutput <- liftIO $ try @IOException execProcess
+  output <- eOutput `onLeft` (throwException "internal exception while executing pg_dump" . show)
+  output `onLeft` throwException "error while executing pg_dump"
   where
-    throwException :: (MonadError RTE.QErr m) => IOException -> m a
-    throwException _ = RTE.throw500 "internal exception while executing pg_dump"
+    throwException :: (MonadError RTE.QErr m, ToJSON e) => Text -> e -> m a
+    throwException text err = throwError (RTE.err500 RTE.Unexpected text) {RTE.qeInternal = Just (RTE.ExtraInternal (toJSON err))}
 
     execProcess = do
+      connString <- T.unpack . bsToTxt <$> PG.pgConnString (PG.ciDetails ci)
+      let opts = connString : "--encoding=utf8" : prbOpts b
       (exitCode, stdOut, stdErr) <- readProcessWithExitCode "pg_dump" opts ""
       return $ case exitCode of
         ExitSuccess -> Right $ unUTF8 $ convertText (clean stdOut)
         ExitFailure _ -> Left $ toText stdErr
 
-    connString = T.unpack $ bsToTxt $ Q.pgConnString $ Q.ciDetails ci
-    opts = connString : "--encoding=utf8" : prbOpts b
-
     clean str
       | prbCleanOutput b =
-        unlines $ filter (not . shouldDropLine) (lines str)
+          unlines $ filter (not . shouldDropLine) (lines str)
       | otherwise = str
 
     shouldDropLine line =
       -- delete empty lines
       all isSpace line
         -- delete comments
-        || "--" `L.isPrefixOf` line
+        || ("--" `L.isPrefixOf` line)
         -- delete front matter
-        || line `elem` preambleLines
+        || (line `elem` preambleLines)
         -- delete notify triggers
-        || eventTriggerRegex `TDFA.match` line
+        || (eventTriggerRegex `TDFA.match` line)
 
     preambleLines =
       [ "SET statement_timeout = 0;",

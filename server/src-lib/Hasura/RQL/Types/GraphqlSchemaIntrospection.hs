@@ -3,19 +3,26 @@ module Hasura.RQL.Types.GraphqlSchemaIntrospection
   )
 where
 
-import Data.Aeson.TH
+import Autodocodec (HasCodec (codec), dimapCodec)
+import Autodocodec.Extended (hashSetCodec)
+import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToEncoding, genericToJSON)
 import Data.HashSet qualified as Set
-import Hasura.Incremental (Cacheable)
+import Hasura.Authentication.Role (RoleName)
 import Hasura.Prelude
-import Hasura.Session
 
 newtype SetGraphqlIntrospectionOptions = SetGraphqlIntrospectionOptions {_idrDisabledForRoles :: (Set.HashSet RoleName)}
   deriving (Show, Eq, Generic, Semigroup, Monoid)
 
 instance NFData SetGraphqlIntrospectionOptions
 
-instance Cacheable SetGraphqlIntrospectionOptions
-
 instance Hashable SetGraphqlIntrospectionOptions
 
-$(deriveJSON hasuraJSON ''SetGraphqlIntrospectionOptions)
+instance HasCodec SetGraphqlIntrospectionOptions where
+  codec = dimapCodec SetGraphqlIntrospectionOptions _idrDisabledForRoles hashSetCodec
+
+instance FromJSON SetGraphqlIntrospectionOptions where
+  parseJSON = genericParseJSON hasuraJSON
+
+instance ToJSON SetGraphqlIntrospectionOptions where
+  toJSON = genericToJSON hasuraJSON
+  toEncoding = genericToEncoding hasuraJSON

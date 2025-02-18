@@ -14,27 +14,22 @@ import Hasura.Backends.MSSQL.Types.Internal
 import Hasura.Prelude
 import Hasura.RQL.IR.BoolExp (AnnBoolExp)
 import Hasura.RQL.Types.Backend (Backend)
-import Hasura.SQL.Backend (BackendType (MSSQL))
+import Hasura.RQL.Types.BackendType (BackendType (MSSQL))
 
 -- | Defines the part in insert mutation that is unique for MSSQL the @if_matched@ clause.
 data BackendInsert v = BackendInsert
   { -- | @if_matched@ can be omitted (and in that case will be @Nothing@).
     --   If omitted, we only insert new rows (without upserting).
-    _biIfMatched :: Maybe (IfMatched v),
-    -- | identity columns are needed for the sql generation and are not part
-    --   of the user input. If the table has identity columns we need to add
-    --   the SQL statements @SET IDENTITY_INSERT ...@ to be able to insert
-    --   into that table.
-    _biIdentityColumns :: [ColumnName]
+    _biIfMatched :: Maybe (IfMatched v)
   }
 
 deriving instance (Backend 'MSSQL, Show (IfMatched v), Show v) => Show (BackendInsert v)
 
-deriving instance Backend 'MSSQL => Functor BackendInsert
+deriving instance (Backend 'MSSQL) => Functor BackendInsert
 
-deriving instance Backend 'MSSQL => Foldable BackendInsert
+deriving instance (Backend 'MSSQL) => Foldable BackendInsert
 
-deriving instance Backend 'MSSQL => Traversable BackendInsert
+deriving instance (Backend 'MSSQL) => Traversable BackendInsert
 
 -- | The IR data representing an @if_matched@ clause, which handles upserts.
 data IfMatched v = IfMatched
@@ -50,8 +45,8 @@ data IfMatched v = IfMatched
 
 deriving instance (Backend 'MSSQL, Show (AnnBoolExp 'MSSQL v), Show v) => Show (IfMatched v)
 
-deriving instance Backend 'MSSQL => Functor IfMatched
+deriving instance (Backend 'MSSQL) => Functor IfMatched
 
-deriving instance Backend 'MSSQL => Foldable IfMatched
+deriving instance (Backend 'MSSQL) => Foldable IfMatched
 
-deriving instance Backend 'MSSQL => Traversable IfMatched
+deriving instance (Backend 'MSSQL) => Traversable IfMatched

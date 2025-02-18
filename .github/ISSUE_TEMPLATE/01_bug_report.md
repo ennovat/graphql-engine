@@ -1,6 +1,6 @@
 ---
-name: 🐜 Bug report
-about: If something isn't working 🔧
+name: 🐜 Bug report (V2)
+about: If something isn't working for Hasura, for version 2.x only 🔧
 labels: "k/bug"
 ---
 
@@ -13,23 +13,16 @@ CLI Version (for CLI related issue):
 
 <!--Cloud/ OSS / EE -->
 
-### What is the expected behaviour?
-
-<!--
-  Provide a clear description of what you want to happen.
--->
-
-### Keywords
-
-<!--
-  What keywords did you use when trying to find an existing bug report?
-  List them here so people in the future can find this one more easily.
--->
-
 ### What is the current behaviour?
 
 <!--
   Provide a clear description of what is the current behaviour.
+-->
+
+### What is the expected behaviour?
+
+<!--
+  Provide a clear description of what you want to happen.
 -->
 
 ### How to reproduce the issue?
@@ -48,14 +41,13 @@ CLI Version (for CLI related issue):
 
 <!-- Provide your answer here. -->
 
-### Any possible solutions?
+### Any possible solutions/workarounds you're aware of?
 
 <!-- Provide your answer here. -->
 
-### Can you identify the location in the source code where the problem exists?
+### Keywords
 
-<!-- Provide your answer here. -->
-
-### If the bug is confirmed, would you be willing to submit a PR?
-
-<!-- Provide your answer here. -->
+<!--
+  What keywords did you use when trying to find an existing bug report?
+  List them here so people in the future can find this one more easily.
+-->

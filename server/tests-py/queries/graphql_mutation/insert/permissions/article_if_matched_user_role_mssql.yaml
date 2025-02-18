@@ -3,30 +3,29 @@
   status: 200
   headers:
     X-Hasura-Role: user_with_all_perms
-    X-Hasura-User-Id: '1'
+    X-Hasura-User-Id: "1"
   response:
     data:
       insert_article:
         affected_rows: 1
         returning:
-        - id: 1
-          title: Article 1
-          content: Updated Article 1 content
-          author_id: 1
+          - id: 1
+            title: Article 1
+            content: Updated Article 1 content
+            author_id: 1
   query:
     query: |
       mutation insert_article {
         insert_article (
           objects: [
             {
-              id: 1
-              title: "unexpected"
+              title: "Article 1"
               content: "Updated Article 1 content"
               author_id: 1
             }
             ],
           if_matched: {
-            match_columns: id
+            match_columns: title
             update_columns: [content]
           }
         ) {
@@ -45,27 +44,26 @@
   status: 200
   headers:
     X-Hasura-Role: user_with_select_and_insert
-    X-Hasura-User-Id: '1'
+    X-Hasura-User-Id: "1"
   response:
-      errors:
+    errors:
       - extensions:
           path: $.selectionSet.insert_article
           code: validation-failed
-        message: '"insert_article" has no argument named "if_matched"'
+        message: "'insert_article' has no argument named 'if_matched'"
   query:
     query: |
       mutation insert_article {
         insert_article (
           objects: [
             {
-              id: 1
-              title: "unexpected"
+              title: "Article 1"
               content: "Updated Article 1 content"
               author_id: 1
             }
             ],
           if_matched: {
-            match_columns: id
+            match_columns: title
             update_columns: [content]
           }
         ) {
@@ -78,27 +76,26 @@
   status: 200
   headers:
     X-Hasura-Role: user_with_update_and_insert
-    X-Hasura-User-Id: '1'
+    X-Hasura-User-Id: "1"
   response:
-      errors:
+    errors:
       - extensions:
           path: $.selectionSet.insert_article
           code: validation-failed
-        message: '"insert_article" has no argument named "if_matched"'
+        message: "'insert_article' has no argument named 'if_matched'"
   query:
     query: |
       mutation insert_article {
         insert_article (
           objects: [
             {
-              id: 1
-              title: "unexpected"
+              title: "Article"
               content: "Updated Article 1 content"
               author_id: 1
             }
             ],
           if_matched: {
-            match_columns: id
+            match_columns: title
             update_columns: [content]
           }
         ) {

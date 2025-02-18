@@ -6,9 +6,29 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"gopkg.in/yaml.v3"
 )
+
+func BenchmarkYAMLToJSON(b *testing.B) {
+	funcs := []struct {
+		name string
+		f    func([]byte) ([]byte, error)
+	}{
+		{"cuelang/encoding", YAMLToJSON},
+	}
+	for _, f := range funcs {
+		b.Run(f.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				input, err := ioutil.ReadFile("testdata/yaml/t1/metadata.yaml")
+				assert.NoError(b, err)
+				_, err = f.f(input)
+				assert.NoError(b, err)
+			}
+		})
+	}
+}
 
 func Test_resolveTags(t *testing.T) {
 	type args struct {
@@ -16,10 +36,11 @@ func Test_resolveTags(t *testing.T) {
 		node *yaml.Node
 	}
 	tests := []struct {
-		name    string
-		args    args
-		want    string
-		wantErr bool
+		name       string
+		args       args
+		want       string
+		wantErr    bool
+		asssertErr require.ErrorAssertionFunc
 	}{
 		{
 			"can resolve !include tags",
@@ -43,6 +64,7 @@ actions: !include "actions.yaml"
         scalars: []
 `,
 			false,
+			require.NoError,
 		},
 		{
 			"can resolve !include tags in strings",
@@ -66,6 +88,7 @@ actions: '!include "actions.yaml"'
         scalars: []
 `,
 			false,
+			require.NoError,
 		},
 		{
 			"can resolve !include tags in strings",
@@ -89,6 +112,7 @@ actions: "!include actions.yaml"
         scalars: []
 `,
 			false,
+			require.NoError,
 		},
 		{
 			"can resolve !include tags with relative paths",
@@ -234,18 +258,18 @@ actions: "!include actions.yaml"
         schema: public
 `,
 			false,
+			require.NoError,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := resolveTags(tt.args.ctx, tt.args.node, nil)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("resolveTags() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			tt.asssertErr(t, err)
+			if !tt.wantErr {
+				b, err := yaml.Marshal(got)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, string(b))
 			}
-			b, err := yaml.Marshal(got)
-			assert.NoError(t, err)
-			assert.Equal(t, tt.want, string(b))
 		})
 	}
 }
@@ -256,10 +280,11 @@ func TestGetIncludeTagFiles(t *testing.T) {
 		baseDir string
 	}
 	tests := []struct {
-		name    string
-		args    args
-		want    []string
-		wantErr bool
+		name      string
+		args      args
+		want      []string
+		wantErr   bool
+		assertErr require.ErrorAssertionFunc
 	}{
 		{
 			"can parse !include custom tags and generate child files",
@@ -277,15 +302,15 @@ func TestGetIncludeTagFiles(t *testing.T) {
 			},
 			[]string{"testdata/include_tags_children/bar/bar.yaml", "testdata/include_tags_children/bar/foo.yaml"},
 			false,
+			require.NoError,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := GetIncludeTagFiles(tt.args.node, tt.args.baseDir)
+			tt.assertErr(t, err)
 			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
+				return
 			}
 			for _, want := range tt.want {
 				found := false

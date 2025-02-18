@@ -1,0 +1,61 @@
+---
+description: Update Hasura GraphQL Engine version
+keywords:
+  - hasura
+  - docs
+  - deployment
+  - update
+  - version
+sidebar_position: 110
+sidebar_label: Update GraphQL Engine
+---
+
+import LatestRelease from '@site/src/components/LatestRelease';
+
+# Update Hasura GraphQL Engine
+
+## Update guides
+
+The Hasura GraphQL Engine runs off a Docker image and updates are as
+simple as changing the image tag.
+
+Based on your deployment method, follow the appropriate guide to update
+the GraphQL Engine version you're running:
+
+- [Update on Docker](/deployment/deployment-guides/docker.mdx#docker-update)
+- [Update on Kubernetes](/deployment/deployment-guides/kubernetes.mdx#kubernetes-update)
+- [Update on DigitalOcean](/deployment/deployment-guides/digital-ocean-one-click.mdx#do-updating)
+
+:::info No-touch Engine Update in Hasura Cloud
+
+Hasura Cloud offers no-touch update paths in a managed environment. For
+more information, read more about [Hasura Cloud](/index.mdx).
+
+:::
+
+## Latest available versions
+
+### Stable version
+
+The current latest stable version is:
+
+<code>
+  hasura/graphql-engine:
+  <LatestRelease />
+</code>
+
+### Pre-release version
+
+The current latest pre-release version is:
+
+<code>
+  hasura/graphql-engine:
+  <LatestRelease prerelease />
+</code>
+
+:::info Note
+
+Full stability with pre-release builds is not guaranteed. They are not
+recommended for production use.
+
+:::

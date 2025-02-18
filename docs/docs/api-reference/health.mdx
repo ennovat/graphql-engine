@@ -1,0 +1,68 @@
+---
+sidebar_label: Health Check API
+sidebar_position: 8
+description: Hasura health API reference
+keywords:
+  - hasura
+  - docs
+  - health API
+  - API reference
+---
+
+# Health Check API Reference
+
+## Introduction
+
+The Health API is a public endpoint which gives info on the server
+health.
+
+## Endpoint
+
+All requests are `GET` requests to the `/healthz` endpoint. There's also
+`/hasura/healthz` available as an alternative, which mirrors `/healthz`
+completely.
+
+## API Spec
+
+### Request
+
+```http
+GET /healthz?strict=false HTTP/1.1
+```
+
+#### Parameters
+
+| Name   | Required | type    | Description                                                                               |
+|--------|----------|---------|-------------------------------------------------------------------------------------------|
+| strict | false    | boolean | If set to `true`, response returns `500` if inconsistent objects exist (default: `false`) |
+
+
+### Response
+
+Depending on the server health status any of the following responses can
+be returned:
+
+| Server condition                                                          | `strict` parameter | HTTP Status | Message                               |
+|---------------------------------------------------------------------------|--------------------|-------------|---------------------------------------|
+| All healthy                                                               | Any                | 200         | OK                                    |
+| Serving requests but some Metadata objects are inconsistent/not-available | `false`            | 200         | WARN: inconsistent objects in schema  |
+| Serving requests but some Metadata objects are inconsistent/not-available | `true`             | 500         | ERROR: inconsistent objects in schema |
+| Unhealthy                                                                 | Any                | 500         | ERROR                                 |
+
+:::info Note
+
+If there are Metadata inconsistencies, you should use the Hasura Console
+or the [get_inconsistent_metadata](/api-reference/metadata-api/manage-metadata.mdx#metadata-get-inconsistent-metadata) Metadata API to find out
+what the inconsistent objects are and resolve them.
+
+:::
+
+#### Sample response
+
+```http
+HTTP/1.1 200 OK
+```
+
+## Disabling Health Check API
+
+The `healthz` API endpoint is public and cannot be disabled.

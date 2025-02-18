@@ -1,0 +1,7 @@
+{
+  "label": "GraphQL Federation",
+  "position": 24,
+  "customProps": {
+    "sidebar_pathname": "data-federation"
+  }
+}

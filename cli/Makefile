@@ -8,9 +8,9 @@ HAS_GOX := $(shell command -v gox;)
 HAS_GINKGO := $(shell command -v ginkgo;)
 
 ifeq (${CI}, true)
-	CLI_EXT_BIN_DIR := "/build/_cli_ext_output"
+	CLI_EXT_BIN_DIR := /build/_cli_ext_output
 else
-	CLI_EXT_BIN_DIR := "../cli-ext/bin"
+	CLI_EXT_BIN_DIR := ../cli-ext/bin
 endif
 
 .PHONY: deps
@@ -28,10 +28,9 @@ build: export CGO_ENABLED=0
 build: copy-cli-ext
 build:
 ifndef HAS_GOX
-	cd ~ && go get github.com/mitchellh/gox && cd -
+	go install github.com/mitchellh/gox@latest
 endif
 	gox -ldflags '-X github.com/hasura/graphql-engine/cli/v2/version.BuildVersion=$(VERSION) -X github.com/hasura/graphql-engine/cli/v2/plugins.IndexBranchRef=$(PLUGINS_BRANCH) -s -w -extldflags "-static"' \
-	-rebuild \
 	-osarch="linux/amd64 darwin/amd64 windows/amd64 linux/arm64 darwin/arm64" \
 	-output="$(OUTPUT_DIR)/$(VERSION)/cli-hasura-{{.OS}}-{{.Arch}}" \
 	./cmd/hasura/
@@ -53,36 +52,46 @@ build-cli-ext:
 
 .PHONY: clean-cli-ext
 clean-cli-ext:
-	rm -rf ./internal/cliext/bin
+	git clean -fx ./internal/cliext/static-bin
 
 .PHONY: copy-cli-ext
-copy-cli-ext: clean-cli-ext
-	cp $(CLI_EXT_BIN_DIR)/cli-ext-hasura-node12-linux-x64 ./internal/cliext/static-bin/linux/amd64/cli-ext
-	cp $(CLI_EXT_BIN_DIR)/cli-ext-hasura-node12-linux-arm64 ./internal/cliext/static-bin/linux/arm64/cli-ext
-	cp $(CLI_EXT_BIN_DIR)/cli-ext-hasura-node12-macos-x64 ./internal/cliext/static-bin/darwin/amd64/cli-ext
-	cp $(CLI_EXT_BIN_DIR)/cli-ext-hasura-node16-macos-arm64 ./internal/cliext/static-bin/darwin/arm64/cli-ext
-	cp $(CLI_EXT_BIN_DIR)/cli-ext-hasura-node12-win-x64.exe ./internal/cliext/static-bin/windows/amd64/cli-ext.exe
+copy-cli-ext: ./internal/cliext/static-bin/linux/amd64/cli-ext ./internal/cliext/static-bin/linux/arm64/cli-ext ./internal/cliext/static-bin/darwin/amd64/cli-ext ./internal/cliext/static-bin/darwin/arm64/cli-ext ./internal/cliext/static-bin/windows/amd64/cli-ext.exe
+
+./internal/cliext/static-bin/linux/amd64/cli-ext: $(CLI_EXT_BIN_DIR)/cli-ext-linux-amd64
+	cp $< $@
+
+./internal/cliext/static-bin/linux/arm64/cli-ext: $(CLI_EXT_BIN_DIR)/cli-ext-linux-arm64
+	cp $< $@
+
+./internal/cliext/static-bin/darwin/amd64/cli-ext: $(CLI_EXT_BIN_DIR)/cli-ext-darwin-amd64
+	cp $< $@
+
+./internal/cliext/static-bin/darwin/arm64/cli-ext: $(CLI_EXT_BIN_DIR)/cli-ext-darwin-arm64
+	cp $< $@
+
+./internal/cliext/static-bin/windows/amd64/cli-ext.exe: $(CLI_EXT_BIN_DIR)/cli-ext-windows-amd64
+	cp $< $@
 
 # run tests
 .PHONY: test
 test: copy-cli-ext
 	echo "--- :: run test"
 	if [ -z "${HASURA_TEST_CLI_HGE_DOCKER_IMAGE}" ]; then echo "Please set HASURA_TEST_CLI_HGE_DOCKER_IMAGE env for populating testutil.HasuraDockerImage and run test"; exit 1; fi
-	go test -ldflags "-X github.com/hasura/graphql-engine/cli/v2/version.BuildVersion=$(VERSION)" -v -tags="${TEST_TAGS}" `go list ./... | grep -v integration_test | grep -v commands`
+	go test -count=1 -ldflags "-X github.com/hasura/graphql-engine/cli/v2/version.BuildVersion=$(VERSION)" -v -tags="${TEST_TAGS}" `go list ./... | grep -v integration_test | grep -v commands`
 integration_tests_config_v3: copy-cli-ext
 	echo "--- :: run integration_tests_config_v3"
 	if [ -z "${HASURA_TEST_CLI_HGE_DOCKER_IMAGE}" ]; then echo "Please set HASURA_TEST_CLI_HGE_DOCKER_IMAGE env for populating testutil.HasuraDockerImage and run test"; exit 1; fi
-	go test -ldflags "-X github.com/hasura/graphql-engine/cli/v2/version.BuildVersion=$(VERSION)" -v -tags="${TEST_TAGS}" -run Commands/config=v3 ./integration_test
+	go test -count=1 -ldflags "-X github.com/hasura/graphql-engine/cli/v2/version.BuildVersion=$(VERSION)" -v -tags="${TEST_TAGS}" -run Commands/config=v3 ./integration_test
 integration_tests_config_v2: copy-cli-ext
 	echo "--- :: run integration_tests_config_v2"
 	if [ -z "${HASURA_TEST_CLI_HGE_DOCKER_IMAGE}" ]; then echo "Please set HASURA_TEST_CLI_HGE_DOCKER_IMAGE env for populating testutil.HasuraDockerImage and run test"; exit 1; fi
-	go test -ldflags "-X github.com/hasura/graphql-engine/cli/v2/version.BuildVersion=$(VERSION)" -v -tags="${TEST_TAGS}" -run Commands/config=v2 ./integration_test
+	go test -count=1 -ldflags "-X github.com/hasura/graphql-engine/cli/v2/version.BuildVersion=$(VERSION)" -v -tags="${TEST_TAGS}" -run Commands/config=v2 ./integration_test
 test-e2e:
 	echo "--- :: run e2e tests"
 ifndef HAS_GINKGO
-	cd ~ && go get github.com/onsi/ginkgo/ginkgo && cd -
+	go install github.com/onsi/ginkgo/ginkgo@latest
 endif
-	cd commands && ginkgo -p -v -failFast
+	cd commands && ginkgo -p -v -failFast $(ARGS)
 
 test-all: test integration_tests_config_v2 integration_tests_config_v3 test-e2e
 # clean the output directory
@@ -91,7 +100,7 @@ clean:
 	rm -rf "$(OUTPUT_DIR)"
 
 .PHONY: all
-all: deps test build
+all: deps build-cli-ext build test
 
 # build cli inside a docker container
 all-in-docker:

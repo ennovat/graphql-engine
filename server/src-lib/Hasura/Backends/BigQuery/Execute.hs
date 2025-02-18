@@ -7,30 +7,40 @@ module Hasura.Backends.BigQuery.Execute
   ( executeSelect,
     runExecute,
     streamBigQuery,
+    executeBigQuery,
+    executeProblemMessage,
+    insertDataset,
+    deleteDataset,
     BigQuery (..),
+    Execute,
+    ExecuteProblem (..),
+    FieldNameText (..),
+    Job (..),
     OutputValue (..),
     RecordSet (..),
-    Execute,
+    ShowDetails (..),
     Value (..),
-    FieldNameText (..),
   )
 where
 
 import Control.Applicative
-import Control.Concurrent
-import Control.Exception.Safe
+import Control.Concurrent.Extended (sleep)
 import Control.Monad.Except
 import Control.Monad.Reader
 import Data.Aeson ((.!=), (.:), (.:?), (.=))
-import Data.Aeson qualified as Aeson
-import Data.Aeson.Types qualified as Aeson
-import Data.ByteString.Lazy qualified as L
+import Data.Aeson qualified as J
+import Data.Aeson.Types qualified as J
+import Data.ByteString.Lazy qualified as BL
 import Data.Foldable
-import Data.HashMap.Strict.InsOrd qualified as OMap
+import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.Maybe
 import Data.Text qualified as T
 import Data.Text.Lazy qualified as LT
 import Data.Text.Lazy.Builder qualified as LT
+import Data.Text.Lazy.Encoding qualified as LT
+import Data.Text.Read qualified as TR
+import Data.Time
+import Data.Time.Format.ISO8601 (iso8601Show)
 import Data.Vector (Vector)
 import Data.Vector qualified as V
 import GHC.Generics
@@ -51,8 +61,8 @@ import Network.HTTP.Types
 -- we choose a naive implementation in the interest of getting other
 -- work done.
 data RecordSet = RecordSet
-  { rows :: !(Vector (InsOrdHashMap FieldNameText OutputValue)),
-    wantedFields :: !(Maybe [Text])
+  { rows :: Vector (InsOrdHashMap FieldNameText OutputValue),
+    wantedFields :: Maybe [Text]
   }
   deriving (Show)
 
@@ -60,59 +70,94 @@ data RecordSet = RecordSet
 -- is just the unqualified text name itself.
 newtype FieldNameText
   = FieldNameText Text
-  deriving (Show, Ord, Eq, Hashable, Aeson.FromJSON, Aeson.ToJSONKey, IsString)
+  deriving (Show, Ord, Eq, Hashable, J.FromJSON, J.ToJSONKey, IsString)
 
 data OutputValue
-  = DecimalOutputValue !Decimal
-  | BigDecimalOutputValue !BigDecimal
-  | IntegerOutputValue !Int64
-  | FloatOutputValue !Float64
-  | GeographyOutputValue !Geography
-  | TextOutputValue !Text
-  | TimestampOutputValue !Timestamp
-  | DateOutputValue !Date
-  | TimeOutputValue !Time
-  | DatetimeOutputValue !Datetime
-  | BytesOutputValue !Base64
-  | BoolOutputValue !Bool
-  | ArrayOutputValue !(Vector OutputValue)
-  | RecordOutputValue !(InsOrdHashMap FieldNameText OutputValue)
+  = DecimalOutputValue Decimal
+  | BigDecimalOutputValue BigDecimal
+  | IntegerOutputValue Int64
+  | FloatOutputValue Float64
+  | GeographyOutputValue Geography
+  | TextOutputValue Text
+  | TimestampOutputValue Timestamp
+  | DateOutputValue Date
+  | TimeOutputValue Time
+  | DatetimeOutputValue Datetime
+  | BytesOutputValue Base64
+  | BoolOutputValue Bool
+  | ArrayOutputValue (Vector OutputValue)
+  | RecordOutputValue (InsOrdHashMap FieldNameText OutputValue)
+  | JsonOutputValue J.Value
   | NullOutputValue -- TODO: Consider implications.
   deriving (Show, Eq, Generic)
 
 instance Hashable OutputValue
 
-instance Aeson.ToJSON OutputValue where
+instance J.ToJSON OutputValue where
   toJSON = \case
-    NullOutputValue -> Aeson.toJSON Aeson.Null
-    DecimalOutputValue !i -> Aeson.toJSON i
-    BigDecimalOutputValue !i -> Aeson.toJSON i
-    FloatOutputValue !i -> Aeson.toJSON i
-    TextOutputValue !i -> Aeson.toJSON i
-    BytesOutputValue !i -> Aeson.toJSON i
-    DateOutputValue !i -> Aeson.toJSON i
-    TimestampOutputValue !i -> Aeson.toJSON i
-    TimeOutputValue !i -> Aeson.toJSON i
-    DatetimeOutputValue !i -> Aeson.toJSON i
-    GeographyOutputValue !i -> Aeson.toJSON i
-    BoolOutputValue !i -> Aeson.toJSON i
-    IntegerOutputValue !i -> Aeson.toJSON i
-    ArrayOutputValue !vector -> Aeson.toJSON vector
-    RecordOutputValue !record -> Aeson.toJSON record
+    NullOutputValue -> J.toJSON J.Null
+    DecimalOutputValue i -> J.toJSON i
+    BigDecimalOutputValue i -> J.toJSON i
+    FloatOutputValue i -> J.toJSON i
+    TextOutputValue i -> J.toJSON i
+    BytesOutputValue i -> J.toJSON i
+    DateOutputValue i -> J.toJSON i
+    TimestampOutputValue i -> J.toJSON i
+    TimeOutputValue i -> J.toJSON i
+    DatetimeOutputValue i -> J.toJSON i
+    GeographyOutputValue i -> J.toJSON i
+    BoolOutputValue i -> J.toJSON i
+    IntegerOutputValue i -> J.toJSON i
+    ArrayOutputValue vector -> J.toJSON vector
+    JsonOutputValue value -> value
+    RecordOutputValue record -> J.toJSON record
 
 data ExecuteReader = ExecuteReader
-  { credentials :: !BigQuerySourceConfig
+  { sourceConfig :: BigQuerySourceConfig
   }
 
 data ExecuteProblem
   = GetJobDecodeProblem String
   | CreateQueryJobDecodeProblem String
-  | ErrorResponseFromServer Status L.ByteString
-  | GetJobResultsProblem SomeException
-  | RESTRequestNonOK Status Text
-  | CreateQueryJobProblem SomeException
+  | InsertDatasetDecodeProblem String
   | ExecuteRunBigQueryProblem BigQueryProblem
-  deriving (Show)
+  | RESTRequestNonOK Status J.Value
+  deriving (Generic)
+
+-- | We use this to hide certain details from the front-end, while allowing
+-- them in tests. We have not actually decided whether showing the details is
+-- insecure, but until we decide otherwise, it's probably best to err on the side
+-- of caution.
+data ShowDetails = HideDetails | InsecurelyShowDetails
+
+instance J.ToJSON ExecuteProblem where
+  toJSON =
+    J.object . \case
+      GetJobDecodeProblem err -> ["get_job_decode_problem" J..= err]
+      CreateQueryJobDecodeProblem err -> ["create_query_job_decode_problem" J..= err]
+      ExecuteRunBigQueryProblem problem -> ["execute_run_bigquery_problem" J..= problem]
+      InsertDatasetDecodeProblem problem -> ["insert_dataset__bigquery_problem" J..= problem]
+      RESTRequestNonOK _ resp -> ["rest_request_non_ok" J..= resp]
+
+executeProblemMessage :: ShowDetails -> ExecuteProblem -> Text
+executeProblemMessage showDetails = \case
+  GetJobDecodeProblem err -> "Fetching BigQuery job status, cannot decode HTTP response; " <> tshow err
+  CreateQueryJobDecodeProblem err -> "Creating BigQuery job, cannot decode HTTP response: " <> tshow err
+  ExecuteRunBigQueryProblem err ->
+    "Cannot execute BigQuery request" <> showErr err
+  InsertDatasetDecodeProblem err ->
+    "Cannot create BigQuery dataset" <> showErr err
+  RESTRequestNonOK status body ->
+    let summary = "BigQuery HTTP request failed with status " <> tshow (statusCode status) <> " " <> tshow (statusMessage status)
+     in case showDetails of
+          HideDetails -> summary
+          InsecurelyShowDetails -> summary <> " and body:\n" <> LT.toStrict (LT.decodeUtf8 (J.encode body))
+  where
+    showErr :: forall a. (Show a) => a -> Text
+    showErr err =
+      case showDetails of
+        HideDetails -> ""
+        InsecurelyShowDetails -> ":\n" <> tshow err
 
 -- | Execute monad; as queries are performed, the record sets are
 -- stored in the map.
@@ -128,45 +173,26 @@ newtype Execute a = Execute
       MonadError ExecuteProblem
     )
 
--- | Big query parameters must be accompanied by an explicit type
--- signature.
-data BigQueryType
-  = DECIMAL
-  | INTEGER
-  | FLOAT
-  | BYTES
-  | STRING
-  | BOOL
-  | ARRAY BigQueryType
-  | GEOGRAPHY
-  | DATE
-  | TIMESTAMP
-  | DATETIME
-  | TIME
-  | BIGDECIMAL
-  deriving (Show, Eq)
-
 data BigQuery = BigQuery
-  { query :: !LT.Text,
-    parameters :: !(InsOrdHashMap ParameterName Parameter),
-    cardinality :: BigQuery.Cardinality
+  { query :: LT.Text,
+    parameters :: InsOrdHashMap ParameterName Parameter
   }
   deriving (Show)
 
 data Parameter = Parameter
-  { typ :: !BigQueryType,
-    value :: !Value
+  { typ :: ScalarType,
+    value :: Value
   }
   deriving (Show)
 
 newtype ParameterName
   = ParameterName LT.Text
-  deriving (Show, Aeson.ToJSON, Ord, Eq, Hashable)
+  deriving (Show, J.ToJSON, Ord, Eq, Hashable)
 
 data BigQueryField = BigQueryField
-  { name :: !FieldNameText,
-    typ :: !BigQueryFieldType,
-    mode :: !Mode
+  { name :: FieldNameText,
+    typ :: BigQueryFieldType,
+    mode :: Mode
   }
   deriving (Show)
 
@@ -183,6 +209,7 @@ data BigQueryFieldType
   | FieldGEOGRAPHY
   | FieldDECIMAL
   | FieldBIGDECIMAL
+  | FieldJSON
   | FieldSTRUCT (Vector BigQueryField)
   deriving (Show)
 
@@ -200,32 +227,36 @@ data IsNullable
 -- Constants
 
 -- | Delay between attempts to get job results if the job is incomplete.
-streamDelaySeconds :: Int
+streamDelaySeconds :: DiffTime
 streamDelaySeconds = 1
+
+bigQueryProjectUrl :: Text -> String
+bigQueryProjectUrl projectId =
+  "https://bigquery.googleapis.com/bigquery/v2/projects/" <> T.unpack projectId
 
 --------------------------------------------------------------------------------
 -- Executing the planned actions forest
 
 runExecute ::
-  MonadIO m =>
+  (MonadIO m) =>
   BigQuerySourceConfig ->
-  Execute RecordSet ->
-  m (Either ExecuteProblem RecordSet)
-runExecute credentials m =
+  Execute (BigQuery.Job, RecordSet) ->
+  m (Either ExecuteProblem (BigQuery.Job, RecordSet))
+runExecute sourceConfig m =
   liftIO
     ( runExceptT
         ( runReaderT
-            (unExecute (m >>= getFinalRecordSet))
-            (ExecuteReader {credentials})
+            (unExecute (m >>= traverse getFinalRecordSet))
+            (ExecuteReader {sourceConfig})
         )
     )
 
-executeSelect :: Select -> Execute RecordSet
+executeSelect :: Select -> Execute (BigQuery.Job, RecordSet)
 executeSelect select = do
-  credentials <- asks credentials
-  recordSet <-
-    streamBigQuery credentials (selectToBigQuery select) >>= liftEither
-  pure recordSet {wantedFields = selectFinalWantedFields select}
+  conn <- asks (_scConnection . sourceConfig)
+  (job, recordSet) <-
+    streamBigQuery conn (selectToBigQuery select) >>= liftEither
+  pure (job, recordSet {wantedFields = selectFinalWantedFields select})
 
 -- | This is needed to strip out unneeded fields (join keys) in the
 -- final query.  This is a relic of the data loader approach. A later
@@ -239,9 +270,9 @@ getFinalRecordSet recordSet =
     recordSet
       { rows =
           fmap
-            ( OMap.filterWithKey
+            ( InsOrdHashMap.filterWithKey
                 ( \(FieldNameText k) _ ->
-                    maybe True (elem k) (wantedFields recordSet)
+                    all (elem k) (wantedFields recordSet)
                 )
             )
             (rows recordSet)
@@ -255,89 +286,73 @@ selectToBigQuery select =
   BigQuery
     { query = LT.toLazyText query,
       parameters =
-        OMap.fromList
+        InsOrdHashMap.fromList
           ( map
-              ( \(int, value) ->
+              ( \(int, (TypedValue typ value)) ->
                   ( ParameterName (LT.toLazyText (ToQuery.paramName int)),
-                    Parameter {typ = valueType value, value}
+                    Parameter {typ, value}
                   )
               )
-              (OMap.toList params)
-          ),
-      cardinality = selectCardinality select
+              (InsOrdHashMap.toList params)
+          )
     }
   where
     (query, params) =
       ToQuery.renderBuilderPretty (ToQuery.fromSelect select)
 
 --------------------------------------------------------------------------------
--- Type system
-
--- | Make a BigQuery type for the given value.
-valueType :: Value -> BigQueryType
-valueType =
-  \case
-    DecimalValue {} -> DECIMAL
-    BigDecimalValue {} -> BIGDECIMAL
-    IntegerValue {} -> INTEGER
-    FloatValue {} -> FLOAT
-    GeographyValue {} -> GEOGRAPHY
-    StringValue {} -> STRING
-    BytesValue {} -> BYTES
-    BoolValue {} -> BOOL
-    DatetimeValue {} -> DATETIME
-    TimeValue {} -> TIME
-    DateValue {} -> DATE
-    TimestampValue {} -> TIMESTAMP
-    ArrayValue values ->
-      ARRAY
-        ( maybe
-            STRING
-            -- Above: If the array is null, it doesn't matter what type
-            -- the element is. So we put STRING.
-            valueType
-            (values V.!? 0)
-            -- Above: We base the type from the first element. Later,
-            -- we could add some kind of sanity check that they are all
-            -- the same type.
-        )
-    NullValue -> STRING
-
--- Above: If the value is null, it doesn't matter what type
--- the element is. So we put STRING.
-
---------------------------------------------------------------------------------
 -- JSON serialization
 
+typeToBigQueryJson :: ScalarType -> J.Value
+typeToBigQueryJson =
+  \case
+    DecimalScalarType -> atomic "NUMERIC"
+    BigDecimalScalarType -> atomic "BIGNUMERIC"
+    IntegerScalarType -> atomic "INTEGER"
+    DateScalarType -> atomic "DATE"
+    TimeScalarType -> atomic "TIME"
+    DatetimeScalarType -> atomic "DATETIME"
+    JsonScalarType -> atomic "JSON"
+    TimestampScalarType -> atomic "TIMESTAMP"
+    FloatScalarType -> atomic "FLOAT"
+    GeographyScalarType -> atomic "GEOGRAPHY"
+    StringScalarType -> atomic "STRING"
+    BytesScalarType -> atomic "BYTES"
+    BoolScalarType -> atomic "BOOL"
+    StructScalarType -> atomic "STRUCT"
+  where
+    atomic ty = J.object ["type" J..= (ty :: Text)]
+
 -- | Make a JSON representation of the type of the given value.
-valueToBigQueryJson :: Value -> Aeson.Value
+valueToBigQueryJson :: Value -> J.Value
 valueToBigQueryJson = go
   where
     go =
       \case
-        NullValue -> Aeson.Null -- TODO: I haven't tested whether BigQuery is happy with this null value.
-        DecimalValue i -> Aeson.object ["value" .= i]
-        BigDecimalValue i -> Aeson.object ["value" .= i]
-        IntegerValue i -> Aeson.object ["value" .= i]
-        FloatValue i -> Aeson.object ["value" .= i]
-        TimestampValue i -> Aeson.object ["value" .= i]
-        DateValue (Date i) -> Aeson.object ["value" .= i]
-        TimeValue (Time i) -> Aeson.object ["value" .= i]
-        DatetimeValue (Datetime i) -> Aeson.object ["value" .= i]
-        GeographyValue (Geography i) -> Aeson.object ["value" .= i]
-        StringValue i -> Aeson.object ["value" .= Aeson.String i]
-        BytesValue i -> Aeson.object ["value" .= i]
+        NullValue -> J.object [("value", J.Null)]
+        DecimalValue i -> J.object ["value" .= i]
+        BigDecimalValue i -> J.object ["value" .= i]
+        IntegerValue i -> J.object ["value" .= i]
+        FloatValue i -> J.object ["value" .= i]
+        TimestampValue i -> J.object ["value" .= i]
+        DateValue (Date i) -> J.object ["value" .= i]
+        TimeValue (Time i) -> J.object ["value" .= i]
+        DatetimeValue (Datetime i) -> J.object ["value" .= i]
+        GeographyValue (Geography i) -> J.object ["value" .= i]
+        StringValue i -> J.object ["value" .= J.String i]
+        BytesValue i -> J.object ["value" .= i]
+        JsonValue i -> J.object ["value" .= i]
         BoolValue i ->
-          Aeson.object
+          J.object
             [ "value"
-                .= Aeson.String
+                .= J.String
                   ( if i
                       then "true"
                       else "false"
                   )
             ]
         ArrayValue vs ->
-          Aeson.object ["array_values" .= Aeson.Array (fmap go vs)]
+          J.object ["array_values" .= J.Array (fmap go vs)]
 
 --------------------------------------------------------------------------------
 -- Execute a query as a job and stream the results into a record set
@@ -348,14 +363,14 @@ valueToBigQueryJson = go
 -- response. Until that test has been done, we should consider this a
 -- preliminary implementation.
 streamBigQuery ::
-  MonadIO m => BigQuerySourceConfig -> BigQuery -> m (Either ExecuteProblem RecordSet)
-streamBigQuery credentials bigquery = do
-  jobResult <- createQueryJob credentials bigquery
+  (MonadIO m) => BigQueryConnection -> BigQuery -> m (Either ExecuteProblem (BigQuery.Job, RecordSet))
+streamBigQuery conn bigquery = do
+  jobResult <- runExceptT $ createQueryJob conn bigquery
   case jobResult of
     Right job -> loop Nothing Nothing
       where
         loop pageToken mrecordSet = do
-          results <- getJobResults credentials job Fetch {pageToken}
+          results <- getJobResults conn job Fetch {pageToken}
           case results of
             Left problem -> pure (Left problem)
             Right
@@ -371,12 +386,29 @@ streamBigQuery credentials bigquery = do
                         Just recordSet@RecordSet {rows} ->
                           (recordSet {rows = rows <> rows'})
                 case mpageToken' of
-                  Nothing -> pure (Right extendedRecordSet)
+                  Nothing -> pure (Right (job, extendedRecordSet))
                   Just pageToken' ->
                     loop (pure pageToken') (pure extendedRecordSet)
             Right JobIncomplete {} -> do
-              liftIO (threadDelay (1000 * 1000 * streamDelaySeconds))
+              liftIO (sleep streamDelaySeconds)
               loop pageToken mrecordSet
+    Left e -> pure (Left e)
+
+-- | Execute a query without expecting any output (e.g. CREATE TABLE or INSERT)
+executeBigQuery :: (MonadIO m) => BigQueryConnection -> BigQuery -> m (Either ExecuteProblem ())
+executeBigQuery conn bigquery = do
+  jobResult <- runExceptT $ createQueryJob conn bigquery
+  case jobResult of
+    Right job -> loop Nothing
+      where
+        loop mrecordSet = do
+          results <- getJobResults conn job Fetch {pageToken = Nothing}
+          case results of
+            Left problem -> pure (Left problem)
+            Right (JobComplete _) -> pure (Right ())
+            Right JobIncomplete {} -> do
+              liftIO (sleep streamDelaySeconds)
+              loop mrecordSet
     Left e -> pure (Left e)
 
 --------------------------------------------------------------------------------
@@ -388,9 +420,9 @@ data JobResults = JobResults
   }
   deriving (Show)
 
-instance Aeson.FromJSON JobResults where
+instance J.FromJSON JobResults where
   parseJSON =
-    Aeson.withObject
+    J.withObject
       "JobResults"
       ( \o -> do
           recordSet <- parseRecordSetPayload o
@@ -410,9 +442,9 @@ data JobResultsResponse
   | JobComplete JobResults
   deriving (Show)
 
-instance Aeson.FromJSON JobResultsResponse where
+instance J.FromJSON JobResultsResponse where
   parseJSON j =
-    Aeson.withObject
+    J.withObject
       "JobResultsResponse"
       ( \o -> do
           kind <- o .: "kind"
@@ -420,7 +452,7 @@ instance Aeson.FromJSON JobResultsResponse where
             then do
               complete <- o .: "jobComplete"
               if complete
-                then fmap JobComplete (Aeson.parseJSON j)
+                then fmap JobComplete (J.parseJSON j)
                 else pure JobIncomplete
             else fail ("Invalid kind: " <> show kind)
       )
@@ -433,151 +465,216 @@ data Fetch = Fetch
 
 -- | Get results of a job.
 getJobResults ::
-  MonadIO m =>
-  BigQuerySourceConfig ->
-  Job ->
+  (MonadIO m) =>
+  BigQueryConnection ->
+  BigQuery.Job ->
   Fetch ->
   m (Either ExecuteProblem JobResultsResponse)
-getJobResults sc@BigQuerySourceConfig {..} Job {jobId, location} Fetch {pageToken} =
-  liftIO (catchAny run (pure . Left . GetJobResultsProblem))
-  where
-    -- https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs/get#query-parameters
-    url =
-      "GET https://bigquery.googleapis.com/bigquery/v2/projects/"
-        <> T.unpack _scProjectId
-        <> "/queries/"
-        <> T.unpack jobId
-        <> "?alt=json&prettyPrint=false"
-        <> "&location="
-        <> T.unpack location
-        <> "&"
-        <> T.unpack (encodeParams extraParameters)
-    run = do
-      let req =
-            setRequestHeader "Content-Type" ["application/json"] $
-              parseRequest_ url
-      eResp <- runBigQuery sc req
-      case eResp of
-        Left e -> pure (Left (ExecuteRunBigQueryProblem e))
-        Right resp ->
-          case getResponseStatusCode resp of
-            200 -> case Aeson.eitherDecode (getResponseBody resp) of
-              Left e -> pure (Left (GetJobDecodeProblem e))
-              Right results -> pure (Right results)
-            _ -> do
-              pure $ Left $ RESTRequestNonOK (getResponseStatus resp) $ lbsToTxt $ getResponseBody resp
-    extraParameters = pageTokenParam
-      where
-        pageTokenParam =
-          case pageToken of
-            Nothing -> []
-            Just token -> [("pageToken", token)]
-    encodeParams = T.intercalate "&" . map (\(k, v) -> k <> "=" <> v)
+getJobResults conn Job {jobId, location} Fetch {pageToken} = runExceptT $ do
+  -- https://cloud.google.com/bigquery/docs/reference/rest/v2/jobs/get#query-parameters
+  let url =
+        "GET "
+          <> bigQueryProjectUrl (getBigQueryProjectId $ _bqProjectId conn)
+          <> "/queries/"
+          <> T.unpack jobId
+          <> "?alt=json&prettyPrint=false"
+          <> "&location="
+          <> T.unpack location
+          <> "&"
+          <> T.unpack (encodeParams extraParameters)
+
+      req =
+        jsonRequestHeader (parseRequest_ url)
+
+      extraParameters = pageTokenParam
+        where
+          pageTokenParam =
+            case pageToken of
+              Nothing -> []
+              Just token -> [("pageToken", token)]
+
+      encodeParams = T.intercalate "&" . map (\(k, v) -> k <> "=" <> v)
+
+  resp <- runBigQueryExcept conn req
+  case getResponseStatusCode resp of
+    200 ->
+      J.eitherDecode (getResponseBody resp)
+        `onLeft` (throwError . GetJobDecodeProblem)
+    _ ->
+      throwError
+        $ RESTRequestNonOK
+          (getResponseStatus resp)
+        $ parseAsJsonOrText
+        $ getResponseBody resp
 
 --------------------------------------------------------------------------------
 -- Creating jobs
 
-data Job = Job
-  { state :: !Text,
-    jobId :: !Text,
-    location :: !Text
+-- | Make a Request return `JSON`
+jsonRequestHeader :: Request -> Request
+jsonRequestHeader =
+  setRequestHeader "Content-Type" ["application/json"]
+
+-- | Create a job asynchronously.
+createQueryJob :: (MonadError ExecuteProblem m, MonadIO m) => BigQueryConnection -> BigQuery -> m Job
+createQueryJob conn BigQuery {..} = do
+  let url =
+        "POST "
+          <> bigQueryProjectUrl (getBigQueryProjectId $ _bqProjectId conn)
+          <> "/jobs?alt=json&prettyPrint=false"
+
+      req =
+        jsonRequestHeader
+          $ setRequestBodyLBS body
+          $ parseRequest_ url
+
+      body =
+        J.encode
+          ( J.object
+              [ "configuration"
+                  .= J.object
+                    [ "jobType" .= "QUERY",
+                      "query"
+                        .= J.object
+                          [ "query" .= query,
+                            "useLegacySql" .= False, -- Important, it makes `quotes` work properly.
+                            "parameterMode" .= "NAMED",
+                            "queryParameters"
+                              .= map
+                                ( \(name, Parameter {..}) ->
+                                    J.object
+                                      [ "name" .= J.toJSON name,
+                                        "parameterType" .= typeToBigQueryJson typ,
+                                        "parameterValue" .= valueToBigQueryJson value
+                                      ]
+                                )
+                                (InsOrdHashMap.toList parameters)
+                          ]
+                    ]
+              ]
+          )
+
+  resp <- runBigQueryExcept conn req
+  case getResponseStatusCode resp of
+    200 ->
+      J.eitherDecode (getResponseBody resp)
+        `onLeft` (throwError . CreateQueryJobDecodeProblem)
+    _ ->
+      throwError
+        $ RESTRequestNonOK
+          (getResponseStatus resp)
+        $ parseAsJsonOrText
+        $ getResponseBody resp
+
+data Dataset = Dataset
+  { datasetId :: Text
   }
   deriving (Show)
 
-instance Aeson.FromJSON Job where
+instance J.FromJSON Dataset where
   parseJSON =
-    Aeson.withObject
-      "Job"
+    J.withObject
+      "Dataset"
       ( \o -> do
-          kind <- o .: "kind"
-          if kind == ("bigquery#job" :: Text)
-            then do
-              state <- do
-                status <- o .: "status"
-                status .: "state"
-              (jobId, location) <- do
-                ref <- o .: "jobReference"
-                -- 'location' is needed in addition to 'jobId' to query a job's
-                -- status
-                (,) <$> ref .: "jobId" <*> ref .: "location"
-              pure Job {state, jobId, location}
-            else fail ("Invalid kind: " <> show kind)
+          datasetId <- o .: "id"
+          pure (Dataset datasetId)
       )
 
--- | Create a job asynchronously.
-createQueryJob :: MonadIO m => BigQuerySourceConfig -> BigQuery -> m (Either ExecuteProblem Job)
-createQueryJob sc@BigQuerySourceConfig {..} BigQuery {..} =
-  liftIO
-    ( do
-        -- putStrLn (LT.unpack query)
-        catchAny run (pure . Left . CreateQueryJobProblem)
-    )
-  where
-    run = do
-      let url =
-            "POST https://content-bigquery.googleapis.com/bigquery/v2/projects/"
-              <> T.unpack _scProjectId
-              <> "/jobs?alt=json&prettyPrint=false"
-      let req =
-            setRequestHeader "Content-Type" ["application/json"] $
-              setRequestBodyLBS body $
-                parseRequest_ url
-      eResp <- runBigQuery sc req
-      case eResp of
-        Left e -> pure (Left (ExecuteRunBigQueryProblem e))
-        Right resp ->
-          case getResponseStatusCode resp of
-            200 ->
-              case Aeson.eitherDecode (getResponseBody resp) of
-                Left e -> pure (Left (CreateQueryJobDecodeProblem e))
-                Right job -> pure (Right job)
-            _ -> do
-              pure $ Left $ RESTRequestNonOK (getResponseStatus resp) $ lbsToTxt $ getResponseBody resp
-    body =
-      Aeson.encode
-        ( Aeson.object
-            [ "configuration"
-                .= Aeson.object
-                  [ "jobType" .= "QUERY",
-                    "query"
-                      .= Aeson.object
-                        [ "query" .= query,
-                          "useLegacySql" .= False, -- Important, it makes `quotes` work properly.
-                          "parameterMode" .= "NAMED",
-                          "queryParameters"
-                            .= map
-                              ( \(name, Parameter {..}) ->
-                                  Aeson.object
-                                    [ "name" .= Aeson.toJSON name,
-                                      "parameterType" .= Aeson.toJSON typ,
-                                      "parameterValue" .= valueToBigQueryJson value
-                                    ]
-                              )
-                              (OMap.toList parameters)
-                        ]
-                  ]
-            ]
-        )
+-- | Delete a dataset
+deleteDataset :: (MonadError ExecuteProblem m, MonadIO m) => BigQueryConnection -> Text -> m ()
+deleteDataset conn datasetId = do
+  let url =
+        "DELETE "
+          <> bigQueryProjectUrl (getBigQueryProjectId $ _bqProjectId conn)
+          <> "/datasets/"
+          <> T.unpack datasetId
+          <> "/?force=true&deleteContents=true"
+
+  let req = jsonRequestHeader (parseRequest_ url)
+
+  resp <- runBigQueryExcept conn req
+  case getResponseStatusCode resp of
+    204 -> pure ()
+    _ ->
+      throwError
+        $ RESTRequestNonOK
+          (getResponseStatus resp)
+        $ parseAsJsonOrText
+        $ getResponseBody resp
+
+-- | Run request and map errors into ExecuteProblem
+runBigQueryExcept ::
+  (MonadError ExecuteProblem m, MonadIO m) =>
+  BigQueryConnection ->
+  Request ->
+  m (Response BL.ByteString)
+runBigQueryExcept conn req = do
+  runBigQuery conn req >>= \case
+    Right a -> pure a
+    Left e -> throwError (ExecuteRunBigQueryProblem e)
+
+-- | Insert a new dataset
+insertDataset :: (MonadError ExecuteProblem m, MonadIO m) => BigQueryConnection -> Text -> m Dataset
+insertDataset conn datasetId =
+  do
+    let url =
+          "POST "
+            <> bigQueryProjectUrl (getBigQueryProjectId $ _bqProjectId conn)
+            <> "/datasets?alt=json&prettyPrint=false"
+
+        req =
+          jsonRequestHeader
+            $ setRequestBodyLBS body
+            $ parseRequest_ url
+
+        body =
+          J.encode
+            ( J.object
+                [ "id" .= datasetId,
+                  "datasetReference"
+                    .= J.object
+                      [ "datasetId" .= datasetId,
+                        "projectId" .= _bqProjectId conn
+                      ]
+                ]
+            )
+
+    resp <- runBigQueryExcept conn req
+    case getResponseStatusCode resp of
+      200 ->
+        J.eitherDecode (getResponseBody resp)
+          `onLeft` (throwError . InsertDatasetDecodeProblem)
+      _ ->
+        throwError
+          $ RESTRequestNonOK
+            (getResponseStatus resp)
+          $ parseAsJsonOrText
+          $ getResponseBody resp
+
+-- | Parse given @'ByteString' as JSON value. If not a valid JSON, encode to plain text.
+parseAsJsonOrText :: BL.ByteString -> J.Value
+parseAsJsonOrText bytestring =
+  fromMaybe (J.String $ lbsToTxt bytestring) $ J.decode bytestring
 
 --------------------------------------------------------------------------------
 -- Consuming recordset from big query
 
-parseRecordSetPayload :: Aeson.Object -> Aeson.Parser RecordSet
+parseRecordSetPayload :: J.Object -> J.Parser RecordSet
 parseRecordSetPayload resp = do
   mSchema <- resp .:? "schema"
-  columns <- maybe (pure V.empty) (.: "fields") mSchema :: Aeson.Parser (Vector BigQueryField)
-  rowsJSON <- fmap (fromMaybe V.empty) (resp .:? "rows" :: Aeson.Parser (Maybe (Vector Aeson.Value)))
+  columns <- maybe (pure V.empty) (.: "fields") mSchema :: J.Parser (Vector BigQueryField)
+  rowsJSON <- fmap (fromMaybe V.empty) (resp .:? "rows" :: J.Parser (Maybe (Vector J.Value)))
   rows <-
     V.imapM
-      (\i row -> parseRow columns row Aeson.<?> Aeson.Index i)
+      (\i row -> parseRow columns row J.<?> J.Index i)
       rowsJSON
-      Aeson.<?> Aeson.Key "rows"
+      J.<?> J.Key "rows"
   pure RecordSet {wantedFields = Nothing, rows}
 
 --------------------------------------------------------------------------------
 -- Schema-driven JSON deserialization
 
-parseRow :: Vector BigQueryField -> Aeson.Value -> Aeson.Parser (InsOrdHashMap FieldNameText OutputValue)
+parseRow :: Vector BigQueryField -> J.Value -> J.Parser (InsOrdHashMap FieldNameText OutputValue)
 parseRow columnTypes value = do
   result <- parseBigQueryRow columnTypes value
   case result of
@@ -587,144 +684,149 @@ parseRow columnTypes value = do
 -- | Parse a row, which at the top-level of the "rows" output has no
 -- {"v":..} wrapper. But when appearing nestedly, does have the
 -- wrapper. See 'parseBigQueryValue'.
-parseBigQueryRow :: Vector BigQueryField -> Aeson.Value -> Aeson.Parser OutputValue
+parseBigQueryRow :: Vector BigQueryField -> J.Value -> J.Parser OutputValue
 parseBigQueryRow columnTypes =
-  Aeson.withObject
+  J.withObject
     "RECORD"
     ( \o -> do
-        fields <- o .: "f" Aeson.<?> Aeson.Key "RECORD"
+        fields <- o .: "f" J.<?> J.Key "RECORD"
         values <-
           sequence
             ( V.izipWith
                 ( \i typ field ->
-                    parseBigQueryField typ field Aeson.<?> Aeson.Index i
+                    parseBigQueryField typ field J.<?> J.Index i
                 )
                 columnTypes
                 fields
             )
-            Aeson.<?> Aeson.Key "f"
-        pure (RecordOutputValue (OMap.fromList (V.toList values)))
+            J.<?> J.Key "f"
+        pure (RecordOutputValue (InsOrdHashMap.fromList (V.toList values)))
     )
 
-parseBigQueryValue :: IsNullable -> BigQueryFieldType -> Aeson.Value -> Aeson.Parser OutputValue
+parseBigQueryValue :: IsNullable -> BigQueryFieldType -> J.Value -> J.Parser OutputValue
 parseBigQueryValue isNullable fieldType object =
   case fieldType of
     FieldSTRUCT types ->
-      has_v isNullable (parseBigQueryRow types) object Aeson.<?> Aeson.Key "RECORD"
+      has_v isNullable (parseBigQueryRow types) object J.<?> J.Key "RECORD"
     FieldDECIMAL ->
-      has_v isNullable (fmap DecimalOutputValue . Aeson.parseJSON) object
-        Aeson.<?> Aeson.Key "DECIMAL"
+      has_v isNullable (fmap DecimalOutputValue . J.parseJSON) object
+        J.<?> J.Key "DECIMAL"
     FieldBIGDECIMAL ->
-      has_v isNullable (fmap BigDecimalOutputValue . Aeson.parseJSON) object
-        Aeson.<?> Aeson.Key "BIGDECIMAL"
+      has_v isNullable (fmap BigDecimalOutputValue . J.parseJSON) object
+        J.<?> J.Key "BIGDECIMAL"
     FieldINTEGER ->
-      has_v isNullable (fmap IntegerOutputValue . Aeson.parseJSON) object
-        Aeson.<?> Aeson.Key "INTEGER"
+      has_v isNullable (fmap IntegerOutputValue . J.parseJSON) object
+        J.<?> J.Key "INTEGER"
     FieldDATE ->
-      has_v isNullable (fmap DateOutputValue . Aeson.parseJSON) object
-        Aeson.<?> Aeson.Key "DATE"
+      has_v isNullable (fmap DateOutputValue . J.parseJSON) object
+        J.<?> J.Key "DATE"
     FieldTIME ->
-      has_v isNullable (fmap TimeOutputValue . Aeson.parseJSON) object
-        Aeson.<?> Aeson.Key "TIME"
+      has_v isNullable (fmap TimeOutputValue . J.parseJSON) object
+        J.<?> J.Key "TIME"
     FieldDATETIME ->
-      has_v isNullable (fmap DatetimeOutputValue . Aeson.parseJSON) object
-        Aeson.<?> Aeson.Key "DATETIME"
+      has_v isNullable (fmap DatetimeOutputValue . J.parseJSON) object
+        J.<?> J.Key "DATETIME"
     FieldTIMESTAMP ->
-      has_v isNullable (fmap (TimestampOutputValue . Timestamp . utctimeToISO8601Text) . Aeson.withText "FieldTIMESTAMP" textToUTCTime) object
-        Aeson.<?> Aeson.Key "TIMESTAMP"
+      has_v isNullable (fmap TimestampOutputValue . parseTimestamp) object
+        J.<?> J.Key "TIMESTAMP"
     FieldGEOGRAPHY ->
-      has_v isNullable (fmap GeographyOutputValue . Aeson.parseJSON) object
-        Aeson.<?> Aeson.Key "GEOGRAPHY"
+      has_v isNullable (fmap GeographyOutputValue . J.parseJSON) object
+        J.<?> J.Key "GEOGRAPHY"
     FieldFLOAT ->
-      has_v isNullable (fmap FloatOutputValue . Aeson.parseJSON) object
-        Aeson.<?> Aeson.Key "FLOAT"
+      has_v isNullable (fmap FloatOutputValue . J.parseJSON) object
+        J.<?> J.Key "FLOAT"
     FieldBOOL ->
-      has_v isNullable (fmap (BoolOutputValue . (== "true")) . Aeson.parseJSON) object
-        Aeson.<?> Aeson.Key "BOOL"
+      has_v isNullable (fmap (BoolOutputValue . (== "true")) . J.parseJSON) object
+        J.<?> J.Key "BOOL"
     FieldSTRING ->
-      has_v isNullable (fmap TextOutputValue . Aeson.parseJSON) object
-        Aeson.<?> Aeson.Key "STRING"
+      has_v isNullable (fmap TextOutputValue . J.parseJSON) object
+        J.<?> J.Key "STRING"
     FieldBYTES ->
-      has_v isNullable (fmap BytesOutputValue . Aeson.parseJSON) object
-        Aeson.<?> Aeson.Key "BYTES"
+      has_v isNullable (fmap BytesOutputValue . J.parseJSON) object
+        J.<?> J.Key "BYTES"
+    FieldJSON ->
+      has_v isNullable (fmap JsonOutputValue . parseJson) object
+        J.<?> J.Key "JSON"
 
-parseBigQueryField :: BigQueryField -> Aeson.Value -> Aeson.Parser (FieldNameText, OutputValue)
+-- | This is a little unfortunate: in its JSON responses, BigQuery gives JSON
+-- fields as strings. So, to parse a JSON response, we need to parse it out of
+-- a JSON string type, hence the unintuitive type signature here.
+parseJson :: J.Value -> J.Parser J.Value
+parseJson = J.withText "JSON" \str ->
+  J.eitherDecode (txtToLbs str) `onLeft` fail
+
+-- | Parse upstream timestamp value in epoch milliseconds and convert it to calendar date time format
+-- https://cloud.google.com/bigquery/docs/reference/standard-sql/data-types#timestamp_type
+parseTimestamp :: J.Value -> J.Parser Timestamp
+parseTimestamp =
+  fmap (Timestamp . utctimeToISO8601Text) . J.withText "FieldTIMESTAMP" textToUTCTime
+  where
+    textToUTCTime :: Text -> J.Parser UTCTime
+    textToUTCTime =
+      either fail (pure . flip addUTCTime (UTCTime (fromGregorian 1970 0 0) 0) . fst)
+        . (TR.rational :: TR.Reader NominalDiffTime)
+
+    utctimeToISO8601Text :: UTCTime -> Text
+    utctimeToISO8601Text = T.pack . iso8601Show
+
+parseBigQueryField :: BigQueryField -> J.Value -> J.Parser (FieldNameText, OutputValue)
 parseBigQueryField BigQueryField {name, typ, mode} value1 =
   case mode of
     Repeated ->
       ( do
-          values <- has_v_generic Aeson.parseJSON value1
+          values <- has_v_generic J.parseJSON value1
           outputs <-
             V.imapM
               ( \i value2 ->
                   parseBigQueryValue IsRequired typ value2
-                    Aeson.<?> Aeson.Index i
+                    J.<?> J.Index i
               )
               values
           pure (name, ArrayOutputValue outputs)
       )
-        Aeson.<?> Aeson.Key "REPEATED"
+        J.<?> J.Key "REPEATED"
     Nullable -> do
       output <-
-        parseBigQueryValue IsNullable typ value1 Aeson.<?> Aeson.Key "NULLABLE"
+        parseBigQueryValue IsNullable typ value1 J.<?> J.Key "NULLABLE"
       pure (name, output)
     NotNullable -> do
       output <-
-        parseBigQueryValue IsRequired typ value1 Aeson.<?> Aeson.Key "REQUIRED"
+        parseBigQueryValue IsRequired typ value1 J.<?> J.Key "REQUIRED"
       pure (name, output)
 
 -- Every value, after the top-level row, is wrapped in this.
 has_v ::
   IsNullable ->
-  (Aeson.Value -> Aeson.Parser OutputValue) ->
-  Aeson.Value ->
-  Aeson.Parser OutputValue
+  (J.Value -> J.Parser OutputValue) ->
+  J.Value ->
+  J.Parser OutputValue
 has_v isNullable f =
-  Aeson.withObject
+  J.withObject
     "HAS_V"
     ( \o ->
         o .: "v" >>= \v ->
           case v of
-            Aeson.Null
+            J.Null
               | IsNullable <- isNullable -> pure NullOutputValue
-            _ -> f v Aeson.<?> Aeson.Key "v"
+            _ -> f v J.<?> J.Key "v"
     )
 
 -- Every value, after the top-level row, is wrapped in this.
 has_v_generic ::
-  (Aeson.Value -> Aeson.Parser a) ->
-  Aeson.Value ->
-  Aeson.Parser a
+  (J.Value -> J.Parser a) ->
+  J.Value ->
+  J.Parser a
 has_v_generic f =
-  Aeson.withObject
+  J.withObject
     "HAS_V"
-    (\o -> o .: "v" >>= \v -> (f v Aeson.<?> Aeson.Key "v"))
+    (\o -> o .: "v" >>= \v -> (f v J.<?> J.Key "v"))
 
 --------------------------------------------------------------------------------
 -- Generic JSON deserialization
 
-instance Aeson.ToJSON BigQueryType where
-  toJSON =
-    \case
-      ARRAY t -> Aeson.object ["type" .= ("ARRAY" :: Text), "arrayType" .= t]
-      DECIMAL -> atomic "NUMERIC"
-      BIGDECIMAL -> atomic "BIGNUMERIC"
-      INTEGER -> atomic "INTEGER"
-      DATE -> atomic "DATE"
-      TIME -> atomic "TIME"
-      DATETIME -> atomic "DATETIME"
-      TIMESTAMP -> atomic "TIMESTAMP"
-      FLOAT -> atomic "FLOAT"
-      GEOGRAPHY -> atomic "GEOGRAPHY"
-      STRING -> atomic "STRING"
-      BYTES -> atomic "BYTES"
-      BOOL -> atomic "BOOL"
-    where
-      atomic ty = Aeson.object ["type" .= (ty :: Text)]
-
-instance Aeson.FromJSON BigQueryField where
+instance J.FromJSON BigQueryField where
   parseJSON =
-    Aeson.withObject
+    J.withObject
       "BigQueryField"
       ( \o -> do
           name <- o .: "name"
@@ -732,31 +834,32 @@ instance Aeson.FromJSON BigQueryField where
             do
               flag :: Text <- o .: "type"
               if
-                  | flag == "NUMERIC" || flag == "DECIMAL" -> pure FieldDECIMAL
-                  | flag == "BIGNUMERIC" || flag == "BIGDECIMAL" ->
+                | flag == "NUMERIC" || flag == "DECIMAL" -> pure FieldDECIMAL
+                | flag == "BIGNUMERIC" || flag == "BIGDECIMAL" ->
                     pure FieldBIGDECIMAL
-                  | flag == "INT64" || flag == "INTEGER" -> pure FieldINTEGER
-                  | flag == "FLOAT64" || flag == "FLOAT" -> pure FieldFLOAT
-                  | flag == "BOOLEAN" || flag == "BOOL" -> pure FieldBOOL
-                  | flag == "STRING" -> pure FieldSTRING
-                  | flag == "DATE" -> pure FieldDATE
-                  | flag == "TIME" -> pure FieldTIME
-                  | flag == "DATETIME" -> pure FieldDATETIME
-                  | flag == "TIMESTAMP" -> pure FieldTIMESTAMP
-                  | flag == "GEOGRAPHY" -> pure FieldGEOGRAPHY
-                  | flag == "BYTES" -> pure FieldBYTES
-                  | flag == "RECORD" || flag == "STRUCT" ->
+                | flag == "INT64" || flag == "INTEGER" -> pure FieldINTEGER
+                | flag == "FLOAT64" || flag == "FLOAT" -> pure FieldFLOAT
+                | flag == "BOOLEAN" || flag == "BOOL" -> pure FieldBOOL
+                | flag == "STRING" -> pure FieldSTRING
+                | flag == "JSON" -> pure FieldJSON
+                | flag == "DATE" -> pure FieldDATE
+                | flag == "TIME" -> pure FieldTIME
+                | flag == "DATETIME" -> pure FieldDATETIME
+                | flag == "TIMESTAMP" -> pure FieldTIMESTAMP
+                | flag == "GEOGRAPHY" -> pure FieldGEOGRAPHY
+                | flag == "BYTES" -> pure FieldBYTES
+                | flag == "RECORD" || flag == "STRUCT" ->
                     do
                       fields <- o .: "fields"
                       pure (FieldSTRUCT fields)
-                  | otherwise -> fail ("Unsupported field type: " ++ show flag)
+                | otherwise -> fail ("Unsupported field type: " ++ show flag)
           mode <- o .:? "mode" .!= Nullable
           pure BigQueryField {..}
       )
 
-instance Aeson.FromJSON Mode where
+instance J.FromJSON Mode where
   parseJSON j = do
-    s <- Aeson.parseJSON j
+    s <- J.parseJSON j
     case s :: Text of
       "NULLABLE" -> pure Nullable
       "REPEATED" -> pure Repeated

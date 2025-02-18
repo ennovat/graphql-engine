@@ -1,76 +1,231 @@
 -- Global project configuration.
+
 --
--- This file can be overridden with cabal.project.local (see e.g. cabal.project.dev)
+-- This file can be overridden with cabal.project.local (see e.g. cabal/dev.project)
 --
--- If you need to switch between several local configurations you can also
--- create a symlink to this file with a different name, e.g.:
---     $ ln -s cabal.project cabal.project.myconfig
---     $ ln -s cabal.project.freeze cabal.project.myconfig.freeze
+-- If you need to switch between several local configurations you can also create a
+-- symbolic link to this file in the project root directory; e.g.:
+--     $ ln -s cabal.project myconfig.project
+--     $ ln -s cabal.project.freeze myconfig.project.freeze
+--
 -- ...and then create a new set of overrides in:
---     cabal.project.myconfig.local
+--     myconfig.project.local
+--
 -- ...and then invoke cabal with
---     $ cabal new-build --project-file=cabal.project.myconfig
+--     $ cabal new-build --project-file=myconfig.project
 --
 -- See: https://www.haskell.org/cabal/users-guide/nix-local-build.html#configuring-builds-with-cabal-project
 
-with-compiler: ghc-8.10.7
+
+-- NOTE: we want to be using 9.10.1 with this patch applied for now:
+-- https://gitlab.haskell.org/ghc/ghc/-/issues/25074
+--
+-- which we do on CI. Hope this makes it into 9.10.2
+--
+-- You can run this locally by installing the bindist I've created 
+--
+--   curl 'https://drive.usercontent.google.com/download?id=1ZYKOwmwINRNzo9M2PkdpDX7htgQ98oMG&export=download&confirm=t' --output 9.10.1-fork-bindist.tar.xz
+--   ghcup install ghc -u file:///9.10.1-fork-bindist.tar.xz
+-- 
+with-compiler: ghc-9.10.1
 
 -- package-level parallelism:
 jobs: $ncpus
 
 packages: server
+packages: server/lib/*/*.cabal
+packages: server/forks/*/*.cabal
 
-constraints:
-  -- Ensure we don't end up with a freeze file that forces an incompatible
-  -- version in CI for `Setup.hs` scripts.
-  setup.Cabal <3.4
+-- TODO remove these when we are able:
+allow-newer: req:template-haskell
+allow-newer: ekg-core:base
+allow-newer: ekg-core:primitive
+allow-newer: ekg-core:ghc-prim
+allow-newer: ekg-core:containers
+allow-newer: ekg-core:inspection-testing
+allow-newer: ekg-core:text
+allow-newer: ekg-json:base
+allow-newer: ekg-json:text
+allow-newer: ekg-json:aeson
+allow-newer: ekg-json:vector
+allow-newer: ekg-prometheus:base
+allow-newer: ekg-prometheus:text
+allow-newer: ekg-prometheus:bytestring
+allow-newer: ekg-prometheus:primitive
+allow-newer: ekg-prometheus:containers
+-- Migrating to 0.25+ looks like it will be a real pain... :(
+-- https://github.com/morpheusgraphql/morpheus-graphql/pull/766
+allow-newer: relude:base
+allow-newer: relude:ghc-prim
+allow-newer: morpheus-graphql:text
+allow-newer: morpheus-graphql:relude
+allow-newer: morpheus-graphql:vector
+allow-newer: morpheus-graphql:transformers
+allow-newer: morpheus-graphql-app:text
+allow-newer: morpheus-graphql-app:vector
+allow-newer: morpheus-graphql-app:transformers
+allow-newer: morpheus-graphql-code-gen:text
+allow-newer: morpheus-graphql-code-gen:optparse-applicative
+allow-newer: morpheus-graphql-code-gen-utils:text
+allow-newer: morpheus-graphql-core:text
+allow-newer: morpheus-graphql-core:transformers
+allow-newer: morpheus-graphql-core:vector
+allow-newer: morpheus-graphql-server:text
+allow-newer: morpheus-graphql-server:transformers
+allow-newer: morpheus-graphql-server:vector
+allow-newer: morpheus-graphql-client:text
+allow-newer: morpheus-graphql-client:req
+allow-newer: req:containers
+allow-newer: morpheus-graphql-client:transformers
+allow-newer: morpheus-graphql-client:vector
+allow-newer: morpheus-graphql-subscriptions:text
+allow-newer: morpheus-graphql-subscriptions:transformers
+allow-newer: servant-openapi3:base
+allow-newer: openapi3:base
+allow-newer: servant-client:base
+allow-newer: servant-client:containers
+allow-newer: servant-client:transformers
+allow-newer: servant-client:mtl
+allow-newer: servant-client-core:base
+allow-newer: servant-client-core:containers
+allow-newer: servant-client-core:free
+allow-newer: servant-client-core:template-haskell
+allow-newer: servant-client-core:transformers
+allow-newer: servant-server:base
+allow-newer: servant-server:containers
+allow-newer: servant-server:either
+allow-newer: servant-server:bytestring
+allow-newer: servant-server:filepath
+allow-newer: servant-server:template-haskell
+allow-newer: servant-server:transformers
+allow-newer: servant-server:mtl
+allow-newer: servant:base
+allow-newer: servant:mtl
+allow-newer: ghc-heap-view:base
+allow-newer: ghc-heap-view:Cabal
+allow-newer: servant:transformers
+allow-newer: singleton-bool:base
+allow-newer: semigroupoids:base
+allow-newer: http-api-data:base
+allow-newer: validation:assoc
+allow-newer: aeson:th-abstraction
+allow-newer: optics-th:th-abstraction
+allow-newer: generics-sop:th-abstraction
+allow-newer: insert-ordered-containers:base
+allow-newer: lucid2:base
+allow-newer: insert-ordered-containers:lens
+allow-newer: uuid-types:text
+allow-newer: uuid-types:template-haskell
+allow-newer: string-interpolate:template-haskell 
+allow-newer: postgresql-simple:time
+allow-newer: postgresql-simple:base
+allow-newer: postgresql-simple:template-haskell
+allow-newer: postgresql-simple:bytestring
+allow-newer: postgresql-simple:text
+allow-newer: postgresql-simple:containers
+allow-newer: postgresql-simple:postgresql-libpq
+allow-newer: openapi3:template-haskell 
+allow-newer: superbuffer:bytestring
+allow-newer: websockets:containers
+allow-newer: http-api-data:containers
+allow-newer: stm-hamt:primitive
+allow-newer: stm-hamt:primitive-extras
+allow-newer: quickcheck-instances:base
+allow-newer: quickcheck-instances:bytestring
+allow-newer: uuid:uuid-types
+allow-newer: connection:tls
+allow-newer: proto-lens:base
+allow-newer: proto-lens-runtime:base
+allow-newer: launchdarkly-server-sdk:lens
+allow-newer: launchdarkly-server-sdk:bytestring
+allow-newer: launchdarkly-server-sdk:text
+allow-newer: launchdarkly-server-sdk:containers
+allow-newer: lrucache:containers
+allow-newer: kriti-lang:aeson
+allow-newer: generic-monoid:base
+allow-newer: aeson-optics:base
+allow-newer: testcontainers:bytestring
+allow-newer: postgresql-libpq:base
+allow-newer: xml-lens:text
+allow-newer: xml-lens:containers
+allow-newer: config-ini:text
+allow-newer: hsc2hs:base
+allow-newer: xml-conduit:Cabal
+allow-newer: cabal-doctest:Cabal
+allow-newer: postgresql-libpq:Cabal
+allow-newer: hsc2hs:filepath
+allow-newer: hsc2hs:containers
+
+-- https://github.com/mokus0/th-extras/pull/20
+allow-newer: th-extras:template-haskell
 
 package *
   -- NOTE: this gets applied to both local (hasura) packages and dependencies,
   -- but optimizations for local hasura packages are overridden/controlled
   -- via the 'optimize-hasura' flag.
   optimization: 2
-  -- For tooling, e.g. 'weeder', and IDE-like stuff:
+  -- For tooling support, e.g. HLS:
   ghc-options: -fwrite-ide-info
+
+  -- we statically link malloc from mimalloc. Out of an abundance of caution,
+  -- disable special treatment of these in all the foreign code we build. The
+  -- only risk is potential for some missed optimizations.
+  -- See: https://github.com/microsoft/mimalloc/issues/785
+  -- NOTE: cc-options is not recognized here for some reason, so we use ghc-options+optc:
+  ghc-options: -optc-fno-builtin-malloc -optc-fno-builtin-calloc -optc-fno-builtin-realloc -optc-fno-builtin-free
 
   haddock-html: true
   haddock-hoogle: true
   haddock-hyperlink-source: true
   haddock-quickjump: true
+  haddock-internal: true
+
+-- Allow for dead-code elimination at link-time, to reduce binary size
+if(os(linux))
+ package *
+  -- ld on M1 OSX does not recognise this:
+  ld-options: -Wl,--gc-sections
+  ghc-options: -split-sections
+  -- -----------------------------------------------------------
 
 package graphql-engine
   ghc-options: -j
   haddock-options: "--show-all"
 
+allow-newer: hedgehog-generic:base
+allow-newer: hedgehog-generic:hedgehog
+
+-- 9.6 support. Awaiting release I guess...
+source-repository-package
+  type: git
+  location: https://github.com/agrafix/Spock
+  tag: 40d028bfea0e94ca7096c719cd024ca47a46e559
+  subdir: Spock-core
+
+-- 9.6 support: https://github.com/jfischoff/postgres-options/pull/7
+source-repository-package
+  type: git
+  location: https://github.com/jfischoff/postgres-options.git
+  tag: 3100f7ca4319748a07a46e2838f4c80f8e3f076a
+
+-- 9.6 support: https://github.com/MichaelXavier/cron/pull/51
+source-repository-package
+  type: git
+  location: https://github.com/TristanCacqueray/cron.git
+  tag: 5f5b662a1d7abc3951ea5a2a625bbf3e83f7a11a
+
 source-repository-package
   type: git
   location: https://github.com/hasura/kriti-lang.git
-  tag: v0.2.2
+  tag: c8fd863d359876af3a0fce47db8a5393dc556667
 
+-- This is an unrelesaed version of "odbc"
+-- For text v2 support
+-- WIP/FIXME: review change, maybe upstream PR
 source-repository-package
   type: git
-  location: https://github.com/hasura/pg-client-hs.git
-  tag: f28738e18b7038627fb59b93dbc67929fe427c57
-
-source-repository-package
-  type: git
-  location: https://github.com/hasura/graphql-parser-hs.git
-  tag: 36212bcc3815434a1bc25dc96f091a783b880ca4
-
-source-repository-package
-  type: git
-  location: https://github.com/hasura/ci-info-hs.git
-  tag: be578a01979fc95137cc2c84827f9fafb99df60f
-
-source-repository-package
-  type: git
-  location: https://github.com/hasura/pool.git
-  tag: bc4c3f739a8fb8ec4444336a34662895831c9acf
-
-source-repository-package
-  type: git
-  location: https://github.com/fpco/odbc.git
-  tag: fc5b592a607d932e5fc96c0f74c0df7c3e910883
+  location: https://github.com/hasura/odbc.git
+  tag: 43b07813d635215b3466824d07890de452920fc2
 
 package odbc
   ghc-options: -Wwarn
@@ -83,17 +238,24 @@ package odbc
 source-repository-package
   type: git
   location: https://github.com/hasura/ekg-core.git
-  tag: ac51c3834e242833e9735394295cbcaa583233f8
+  tag: df610859603b504494ad770bdbb7053a7f0b9a6c
 
 source-repository-package
   type: git
-  location: https://github.com/hasura/ekg-json.git
-  tag: 84990712c165d7e3e76b2b289640ef8b5033f12f
+  location: https://github.com/hasura/libdeflate-hs.git
+  tag: e6f020a1a24d07516d753fbb6f30758774f76372
 
--- This is v1.2.3.2 with https://github.com/haskell/text/pull/348
--- cherry-picked. When 1.3 is released we can move from this fork.
+-- waiting on release:
 source-repository-package
   type: git
-  location: https://github.com/hasura/text.git
-  tag: 874c3164fadf39a83382359d2b6ce941a3e134da
+  location: https://github.com/testcontainers/testcontainers-hs
+  tag: fe0d6bbce6ce74d5843a964ac231929ea37025e8
+
+-- while we wait for 9.10 support to be released, see:
+-- https://gitlab.haskell.org/ghc/ghc-debug/-/merge_requests/60 
+source-repository-package
+  type: git
+  location: https://gitlab.haskell.org/ghc/ghc-debug.git
+  tag: 2541e77d2687b8b3b0c1a52bb4790a602ce17d7d
+  subdir: stub
 

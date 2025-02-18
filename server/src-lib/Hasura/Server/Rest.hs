@@ -5,31 +5,42 @@ module Hasura.Server.Rest
 where
 
 import Control.Monad.Trans.Control (MonadBaseControl)
-import Data.Aeson hiding (json)
+import Data.Aeson
 import Data.Aeson qualified as J
 import Data.Align qualified as Align
 import Data.Environment qualified as Env
-import Data.HashMap.Strict qualified as M
+import Data.HashMap.Strict.Extended qualified as HashMap
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as T
 import Data.Text.Extended
 import Data.These (These (..))
+import Hasura.Authentication.User (UserInfo)
+import Hasura.Backends.DataConnector.Agent.Client (AgentLicenseKey)
 import Hasura.Base.Error
+import Hasura.CredentialCache
 import Hasura.EncJSON
 import Hasura.GraphQL.Execute qualified as E
-import Hasura.GraphQL.Execute.Backend qualified as EB
-import Hasura.GraphQL.Logging (MonadQueryLog)
-import Hasura.GraphQL.ParameterizedQueryHash (ParameterizedQueryHashList (..))
+import Hasura.GraphQL.Logging (MonadExecutionLog, MonadQueryLog)
+import Hasura.GraphQL.ParameterizedQueryHash
+import Hasura.GraphQL.Parser.Name qualified as GName
 import Hasura.GraphQL.Transport.HTTP qualified as GH
 import Hasura.GraphQL.Transport.HTTP.Protocol
 import Hasura.HTTP
+import Hasura.Logging qualified as L
 import Hasura.Metadata.Class
-import Hasura.Prelude hiding (get, put)
-import Hasura.RQL.Types
+import Hasura.Prelude
+import Hasura.QueryTags
+import Hasura.RQL.Types.Common
+import Hasura.RQL.Types.Endpoint
+import Hasura.RQL.Types.QueryCollection
+import Hasura.RQL.Types.SchemaCache
+import Hasura.Server.Init qualified as Init
 import Hasura.Server.Limits
 import Hasura.Server.Logging
+import Hasura.Server.Name qualified as Name
+import Hasura.Server.Prometheus (PrometheusMetrics)
 import Hasura.Server.Types
-import Hasura.Session
+import Hasura.Services
 import Hasura.Tracing qualified as Tracing
 import Language.GraphQL.Draft.Syntax qualified as G
 import Network.HTTP.Types qualified as HTTP
@@ -45,48 +56,26 @@ parseVariableNames queryx =
 alignVars :: [G.VariableDefinition] -> [(Text, Either Text Value)] -> HashMap G.Name (These G.VariableDefinition (Either Text Value))
 alignVars defVars parseVars =
   Align.align
-    (M.fromList (map (\v -> (G._vdName v, v)) defVars))
-    (M.fromList (mapMaybe (\(k, v) -> (,v) <$> G.mkName k) parseVars))
+    (HashMap.fromList (map (\v -> (G._vdName v, v)) defVars))
+    (HashMap.fromList (mapMaybe (\(k, v) -> (,v) <$> G.mkName k) parseVars))
 
+-- | `resolveVar` is responsible for decoding variables sent via REST request.
+-- These can either be via body (represented by Right) or via query-param or URL param (represented by Left).
+-- A variable can be expected, unexpected, or missing (represented by These, This, and That).
 resolveVar :: G.Name -> These G.VariableDefinition (Either Text J.Value) -> Either Text (Maybe Value)
-resolveVar _ (This _expectedVar) = Right Nothing
-resolveVar varName (That _providedVar) = Left $ "Unexpected variable " <> toTxt @G.Name varName
-resolveVar varName (These expectedVar providedVar) =
-  -- TODO: See CustomTypes.hs for SCALAR types
+resolveVar _ (This _expectedVar) = Right Nothing -- If a variable is expected but missing, assign a missing value `Nothing` to it for resolution in query execution. This allows Null defaulting.
+resolveVar varName (That _providedVar) = Left $ "Unexpected variable " <> toTxt @G.Name varName -- If a variable is unexpected but present, throw an error.
+resolveVar _varName (These _expectedVar (Right bodyVar)) = Right (Just bodyVar) -- Variables sent via body can be passed through to execution without parsing.
+resolveVar varName (These expectedVar (Left l)) =
   case G._vdType expectedVar of
-    G.TypeNamed (G.Nullability nullable) typeName -> case providedVar of
-      Right r -> Right (Just r)
-      Left l
-        | typeName == stringScalar -> Right $ Just $ J.String l -- "String" -- Note: Strings don't need to be decoded since the format already matches.
-        | otherwise ->
-          case (J.decodeStrict (T.encodeUtf8 l), nullable) of
-            (Just J.Null, True) -> pure Nothing
-            (decoded, _)
-              | typeName == boolScalar && T.null l -> Right $ Just $ J.Bool True -- Key present but value missing for bools defaults to True.
-              | typeName == $$(G.litName "UUID") -> Right $ Just $ J.String l
-              | typeName == $$(G.litName "uuid") -> Right $ Just $ J.String l
-              | typeName == idScalar -> Right $ Just $ J.String l -- "ID" -- Note: Console doesn't expose this as a column type.
-              | otherwise -> case decoded of
-                (Just J.Null) -> Left $ "Null or missing value for non-nullable variable: " <> G.unName varName
-                (Just x@(J.Bool _))
-                  | typeName == boolScalar -> pure $ Just x -- "Boolean"
-                  | typeName == $$(G.litName "Bool") -> pure $ Just x
-                  | otherwise -> Left $ "Expected " <> toTxt typeName <> " for variable " <> G.unName varName <> " got Bool"
-                (Just x@(J.Number _))
-                  | typeName == intScalar -> pure $ Just x -- "Int"
-                  | typeName == floatScalar -> pure $ Just x -- "Float"
-                  | typeName == $$(G.litName "Number") -> pure $ Just x
-                  | typeName == $$(G.litName "Double") -> pure $ Just x
-                  | typeName == $$(G.litName "float8") -> pure $ Just x
-                  | typeName == $$(G.litName "numeric") -> pure $ Just x
-                  | otherwise -> Left $ "Expected " <> toTxt typeName <> " for variable " <> G.unName varName <> " got Number"
-                _ -> Left ("Type of URL parameter for variable " <> G.unName varName <> " not supported - Consider putting it in the request body: " <> tshow l)
-    -- TODO: This is a fallthrough case and is still required
-    --       but we can move checks for template variables being
-    --       scalars into the schema-cache construction.
-    G.TypeList _ _ -> case providedVar of
-      Right r -> Right (Just r)
-      Left l -> Left ("The variable type for the expected variable " <> toTxt @G.Name varName <> ", with value " <> tshow l <> " is not supported.")
+    G.TypeList _ _ -> Left $ "List variables are not currently supported in URL or Query parameters. (Variable " <> toTxt @G.Name varName <> ", with value " <> tshow l <> ")"
+    G.TypeNamed (G.Nullability nullable) typeName
+      | typeName == GName._Boolean && T.null l -> Right $ Just $ J.Bool True -- Booleans indicated true by a standalone key.
+      | nullable && T.null l -> Right Nothing -- Missing value, but nullable variable sets value to null.
+      | otherwise -> case J.decodeStrict (T.encodeUtf8 l) of -- We special case parsing of bools and numbers and pass the rest through as literal strings.
+          Just v@(J.Bool _) | typeName `elem` [Name._Bool, GName._Boolean] -> Right $ Just v
+          Just v@(J.Number _) | typeName `elem` [GName._Int, GName._Float, Name._Number, Name._Double, Name._float8, Name._numeric] -> Right $ Just v
+          _ -> Right $ Just $ J.String l
 
 mkPassthroughRequest :: EndpointMetadata GQLQueryWithText -> VariableValues -> GQLReq GQLQueryText
 mkPassthroughRequest queryx resolvedVariables =
@@ -116,22 +105,34 @@ runCustomEndpoint ::
     MonadBaseControl IO m,
     E.MonadGQLExecutionCheck m,
     MonadQueryLog m,
+    MonadExecutionLog m,
     GH.MonadExecuteQuery m,
-    MonadMetadataStorage (MetadataStorageT m),
-    HttpLog m,
-    EB.MonadQueryTags m,
-    HasResourceLimits m
+    MonadMetadataStorage m,
+    MonadQueryTags m,
+    HasResourceLimits m,
+    ProvidesNetwork m,
+    MonadGetPolicies m
   ) =>
   Env.Environment ->
-  E.ExecutionCtx ->
+  SQLGenCtx ->
+  SchemaCache ->
+  Init.AllowListStatus ->
+  ReadOnlyMode ->
+  RemoteSchemaResponsePriority ->
+  HeaderPrecedence ->
+  TraceQueryStatus ->
+  PrometheusMetrics ->
+  L.Logger L.Hasura ->
+  Maybe (CredentialCache AgentLicenseKey) ->
   RequestId ->
   UserInfo ->
   [HTTP.Header] ->
   Wai.IpAddress ->
   RestRequest EndpointMethod ->
   EndpointTrie GQLQueryWithText ->
-  m (HttpLogMetadata m, HttpResponse EncJSON)
-runCustomEndpoint env execCtx requestId userInfo reqHeaders ipAddress RestRequest {..} endpoints = do
+  Init.ResponseInternalErrorsConfig ->
+  m (HttpLogGraphQLInfo, HttpResponse EncJSON)
+runCustomEndpoint env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence traceQueryStatus prometheusMetrics logger agentLicenseKey requestId userInfo reqHeaders ipAddress RestRequest {..} endpoints responseErrorsConfig = do
   -- First match the path to an endpoint.
   case matchPath reqMethod (T.split (== '/') reqPath) endpoints of
     MatchFound (queryx :: EndpointMetadata GQLQueryWithText) matches ->
@@ -151,20 +152,19 @@ runCustomEndpoint env execCtx requestId userInfo reqHeaders ipAddress RestReques
               -- If there is a mismatch, throw an error. Also, check that the provided
               -- values are compatible with the expected types.
               let expectedVariables = G._todVariableDefinitions typedDef
-              let joinedVars = M.traverseWithKey resolveVar (alignVars expectedVariables (reqArgs ++ zip (parseVariableNames queryx) (map Left matches)))
+              let joinedVars = HashMap.traverseWithKey resolveVar (alignVars expectedVariables (reqArgs ++ zip (parseVariableNames queryx) (map Left matches)))
 
               resolvedVariablesMaybe <- joinedVars `onLeft` throw400 BadRequest
 
-              let resolvedVariables = M.mapMaybe id resolvedVariablesMaybe
+              let resolvedVariables = catMaybes resolvedVariablesMaybe
 
               -- Construct a graphql query by pairing the resolved variables
               -- with the query string from the schema cache, and pass it
               -- through to the /v1/graphql endpoint.
-              (httpLoggingMetadata, handlerResp) <- flip runReaderT execCtx $ do
-                (gqlOperationLog, resp) <- GH.runGQ env (E._ecxLogger execCtx) requestId userInfo ipAddress reqHeaders E.QueryHasura (mkPassthroughRequest queryx resolvedVariables)
-                let httpLogMetadata =
-                      buildHttpLogMetadata @m (PQHSetSingleton (gqolParameterizedQueryHash gqlOperationLog)) RequestModeNonBatchable Nothing
-                return (httpLogMetadata, fst <$> resp)
+              (httpLoggingMetadata, handlerResp) <- do
+                (gqlOperationLog, resp) <- GH.runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence traceQueryStatus prometheusMetrics logger agentLicenseKey requestId userInfo ipAddress reqHeaders E.QueryHasura (mkPassthroughRequest queryx resolvedVariables) responseErrorsConfig
+                let httpLoggingGQInfo = (CommonHttpLogMetadata RequestModeNonBatchable Nothing, (PQHSetSingleton (gqolParameterizedQueryHash gqlOperationLog)))
+                return (httpLoggingGQInfo, fst <$> resp)
               case sequence handlerResp of
                 Just resp -> pure (httpLoggingMetadata, fmap encodeHTTPResp resp)
                 -- a Nothing value here indicates a failure to parse the cached request from redis.

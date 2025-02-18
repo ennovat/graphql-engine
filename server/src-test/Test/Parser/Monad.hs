@@ -1,0 +1,172 @@
+-- | This module defines the monads required to run parser tests.
+--
+-- Warning: a lot of the implementations are currently 'undefined'. As we write
+-- more advanced tests, they might require implementations.
+module Test.Parser.Monad
+  ( ParserTest (..),
+    SchemaEnvironment (..),
+    SchemaTest,
+    runSchemaTest,
+    notImplementedYet,
+  )
+where
+
+import Control.Monad.Memoize
+import Data.Aeson.Types (JSONPathElement)
+import Data.Has (Has (..))
+import Data.Text qualified as T
+import GHC.Stack
+import Hasura.Authentication.Role (adminRoleName)
+import Hasura.Base.Error (QErr)
+import Hasura.Base.ErrorMessage
+import Hasura.GraphQL.Parser.Class
+import Hasura.GraphQL.Parser.ErrorCode
+import Hasura.GraphQL.Schema.Common
+import Hasura.GraphQL.Schema.Typename
+import Hasura.Prelude
+import Hasura.RQL.Types.BackendType
+import Hasura.RQL.Types.NamingCase
+import Hasura.RQL.Types.Schema.Options (SchemaOptions (..))
+import Hasura.RQL.Types.Schema.Options qualified as Options
+import Hasura.RQL.Types.Source (SourceInfo)
+import Hasura.RQL.Types.SourceCustomization (MkRootFieldName)
+import Hasura.RemoteSchema.SchemaCache (CustomizeRemoteFieldName)
+import Language.Haskell.TH.Syntax qualified as TH
+import Test.HUnit.Lang (assertFailure)
+
+-- | Placeholder value for test inputs that are not relevant yet.
+notImplementedYet :: (HasCallStack) => String -> a
+notImplementedYet thing =
+  withFrozenCallStack
+    $ error
+    $ ( unlines
+          [ "\"" ++ thing ++ "\" is not yet defined, because it hasn't been touched by tests yet.",
+            "If you see this message you likely need to provide/mock a value here"
+          ]
+      )
+
+-- | Monad builder environment.
+--
+-- Parser functions generally have a return type of @m (Parser n)@. The @m@
+-- parameter is mocked through 'SchemaTestM', which requires a bunch of 'Has'
+-- instances, as well as a 'ReaderT' instance for environment
+-- settings/configurations. This type repesents these settings.
+--
+-- SchemaEnvironment: currently void. This is subject to change if we require
+-- more complex setup.
+data SchemaEnvironment = SchemaEnvironment
+  { seSchemaOptions :: SchemaOptions,
+    seSourceInfo :: SourceInfo ('Postgres 'Vanilla)
+  }
+
+defaultSchemaOptions :: SchemaOptions
+defaultSchemaOptions =
+  SchemaOptions
+    { soStringifyNumbers = Options.Don'tStringifyNumbers,
+      soDangerousBooleanCollapse = Options.Don'tDangerouslyCollapseBooleans,
+      soRemoteNullForwardingPolicy = Options.RemoteForwardAccurately,
+      soInferFunctionPermissions = Options.InferFunctionPermissions,
+      soOptimizePermissionFilters = Options.Don'tOptimizePermissionFilters,
+      soIncludeUpdateManyFields = Options.IncludeUpdateManyFields,
+      soIncludeAggregationPredicates = Options.IncludeAggregationPredicates,
+      soIncludeStreamFields = Options.IncludeStreamFields,
+      soBigQueryStringNumericInput = Options.EnableBigQueryStringNumericInput,
+      soIncludeGroupByAggregateFields = Options.IncludeGroupByAggregateFields,
+      soPostgresArrays = Options.UsePostgresArrays,
+      soNoNullUnboundVariableDefault = Options.DefaultUnboundNullableVariablesToNull,
+      soRemoveEmptySubscriptionResponses = Options.PreserveEmptyResponses
+    }
+
+instance Has NamingCase SchemaEnvironment where
+  getter :: SchemaEnvironment -> NamingCase
+  getter = const HasuraCase
+
+  modifier :: (NamingCase -> NamingCase) -> SchemaEnvironment -> SchemaEnvironment
+  modifier = notImplementedYet "modifier<Has NamingCase SchemaEnvironment>"
+
+instance Has SchemaOptions SchemaEnvironment where
+  getter :: SchemaEnvironment -> SchemaOptions
+  getter = seSchemaOptions
+
+  modifier :: (SchemaOptions -> SchemaOptions) -> SchemaEnvironment -> SchemaEnvironment
+  modifier f env = env {seSchemaOptions = f (seSchemaOptions env)}
+
+instance Has (SourceInfo ('Postgres 'Vanilla)) SchemaEnvironment where
+  getter :: SchemaEnvironment -> SourceInfo ('Postgres 'Vanilla)
+  getter = seSourceInfo
+
+  modifier :: (SourceInfo ('Postgres 'Vanilla) -> SourceInfo ('Postgres 'Vanilla)) -> SchemaEnvironment -> SchemaEnvironment
+  modifier = notImplementedYet "modifier<Has (SourceInfo ('Postgres 'Vanilla)) SchemaEnvironment>"
+
+instance Has SchemaContext SchemaEnvironment where
+  getter :: SchemaEnvironment -> SchemaContext
+  getter =
+    const
+      SchemaContext
+        { scSchemaKind = HasuraSchema,
+          scRemoteRelationshipParserBuilder = ignoreRemoteRelationship,
+          scRole = adminRoleName,
+          scSampledFeatureFlags = SchemaSampledFeatureFlags []
+        }
+
+  modifier :: (SchemaContext -> SchemaContext) -> SchemaEnvironment -> SchemaEnvironment
+  modifier = notImplementedYet "modifier<Has SchemaContext SchemaEnvironment>"
+
+instance Has MkTypename SchemaEnvironment where
+  getter :: SchemaEnvironment -> MkTypename
+  getter = const (MkTypename id)
+
+  modifier :: (MkTypename -> MkTypename) -> SchemaEnvironment -> SchemaEnvironment
+  modifier = notImplementedYet "modifier<Has MkTypeName SchemaEnvironment>"
+
+instance Has MkRootFieldName SchemaEnvironment where
+  getter :: SchemaEnvironment -> MkRootFieldName
+  getter = const mempty
+
+  modifier :: (MkRootFieldName -> MkRootFieldName) -> SchemaEnvironment -> SchemaEnvironment
+  modifier = notImplementedYet "modifier<Has MkRootFieldName SchemaEnvironment>"
+
+instance Has CustomizeRemoteFieldName SchemaEnvironment where
+  getter :: SchemaEnvironment -> CustomizeRemoteFieldName
+  getter = notImplementedYet "getter<Has CustomizeRemoteFieldName SchemaEnvironment>"
+
+  modifier :: (CustomizeRemoteFieldName -> CustomizeRemoteFieldName) -> SchemaEnvironment -> SchemaEnvironment
+  modifier = notImplementedYet "modifier<Has CustomizeRemoteFieldName SchemaEnvironment>"
+
+-------------------------------------------------------------------------------
+
+-- | SchemaTest
+type SchemaTest = SchemaT SchemaEnvironment SchemaTestInternal
+
+runSchemaTest :: SourceInfo ('Postgres 'Vanilla) -> SchemaTest a -> a
+runSchemaTest sourceInfo = runSchemaTestInternal . flip runReaderT (SchemaEnvironment defaultSchemaOptions sourceInfo) . runSchemaT
+
+newtype SchemaTestInternal a = SchemaTestInternal {runSchemaTestInternal :: a}
+  deriving stock (Functor)
+  deriving (Applicative, Monad) via Identity
+
+instance MonadError QErr SchemaTestInternal where
+  throwError :: forall a. QErr -> SchemaTestInternal a
+  throwError = notImplementedYet "throwError<MonadError QErr SchemaTestT>"
+
+  catchError :: forall a. SchemaTestInternal a -> (QErr -> SchemaTestInternal a) -> SchemaTestInternal a
+  catchError = notImplementedYet "catchError<MonadError QErr SchemaTestInternal>"
+
+instance MonadMemoize SchemaTestInternal where
+  memoizeOn :: TH.Name -> a -> SchemaTestInternal p -> SchemaTestInternal p
+  memoizeOn _ _ = id
+
+-------------------------------------------------------------------------------
+
+-- | ParserTest
+newtype ParserTest a = ParserTest {runParserTest :: IO a}
+  deriving stock (Functor)
+  deriving newtype (Applicative, Monad)
+
+instance MonadParse ParserTest where
+  withKey :: JSONPathElement -> ParserTest a -> ParserTest a
+  withKey = const id
+
+  parseErrorWith :: ParseErrorCode -> ErrorMessage -> ParserTest a
+  parseErrorWith code text =
+    ParserTest . assertFailure $ show code <> ": " <> T.unpack (fromErrorMessage text)

@@ -8,16 +8,16 @@ module Hasura.RQL.Types.Roles.Internal
   )
 where
 
-import Data.HashMap.Strict qualified as Map
+import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as Set
 import Data.Semigroup (Any (..), Max (..))
 import Hasura.Prelude
 import Hasura.RQL.IR.BoolExp
 import Hasura.RQL.Types.Backend
-import Hasura.RQL.Types.RemoteSchema
+import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.SchemaCache
-import Hasura.RQL.Types.Table
-import Hasura.SQL.Backend
+import Hasura.RemoteSchema.SchemaCache.Types
+import Hasura.Table.Cache
 import Language.GraphQL.Draft.Syntax qualified as G
 
 -- | 'CheckPermission' is a type which can be used to combine multiple
@@ -27,10 +27,7 @@ data CheckPermission permissionType
   = CPUndefined
   | CPInconsistent
   | CPDefined permissionType
-
-deriving instance (Show permissionType) => Show (CheckPermission permissionType)
-
-deriving instance (Eq permissionType) => Eq (CheckPermission permissionType)
+  deriving stock (Show, Eq)
 
 instance
   (OnlyRelevantEq permissionType) =>
@@ -41,10 +38,13 @@ instance
   CPInconsistent <> _ = CPInconsistent
   _ <> CPInconsistent = CPInconsistent
   CPDefined d1 <> CPDefined d2
-    | d1 `relevantEq` d2 = CPDefined d1
+    | d1 ==~ d2 = CPDefined d1
     | otherwise = CPInconsistent
 
-instance (OnlyRelevantEq permissionType) => Monoid (CheckPermission permissionType) where
+instance
+  (OnlyRelevantEq permissionType) =>
+  Monoid (CheckPermission permissionType)
+  where
   mempty = CPUndefined
 
 -- | CombineRolePermInfo acts as an intermediate type to be able to
@@ -52,16 +52,18 @@ instance (OnlyRelevantEq permissionType) => Monoid (CheckPermission permissionTy
 --   instance. Multiple role permissions are combined for inherited
 --   role permissions where this is used.
 data CombineRolePermInfo (b :: BackendType) = CombineRolePermInfo
-  { crpiInsPerm :: !(CheckPermission (InsPermInfo b)),
-    crpiSelPerm :: !(Maybe (CombinedSelPermInfo b)),
-    crpiUpdPerm :: !(CheckPermission (UpdPermInfo b)),
-    crpiDelPerm :: !(CheckPermission (DelPermInfo b))
+  { crpiInsPerm :: CheckPermission (InsPermInfo b),
+    crpiSelPerm :: Maybe (CombinedSelPermInfo b),
+    crpiUpdPerm :: CheckPermission (UpdPermInfo b),
+    crpiDelPerm :: CheckPermission (DelPermInfo b)
   }
 
 instance
   ( Backend b,
-    Eq (BooleanOperators b (PartialSQLExp b)),
-    Hashable (BooleanOperators b (PartialSQLExp b))
+    Semigroup (CheckPermission (DelPermInfo b)),
+    Semigroup (CheckPermission (InsPermInfo b)),
+    Semigroup (CheckPermission (UpdPermInfo b)),
+    Semigroup (CombinedSelPermInfo b)
   ) =>
   Semigroup (CombineRolePermInfo b)
   where
@@ -75,8 +77,10 @@ instance
 
 instance
   ( Backend b,
-    Eq (BooleanOperators b (PartialSQLExp b)),
-    Hashable (BooleanOperators b (PartialSQLExp b))
+    Monoid (CheckPermission (DelPermInfo b)),
+    Monoid (CheckPermission (InsPermInfo b)),
+    Monoid (CheckPermission (UpdPermInfo b)),
+    Monoid (Maybe (CombinedSelPermInfo b))
   ) =>
   Monoid (CombineRolePermInfo b)
   where
@@ -91,16 +95,17 @@ rolePermInfoToCombineRolePermInfo RolePermInfo {..} =
     (maybeToCheckPermission _permDel)
   where
     modifySingleSelectPerm SelPermInfo {..} =
-      let columnCaseBoolExp = fmap AnnColumnCaseBoolExpField spiFilter
-          colsWithColCaseBoolExp = spiCols $> Just columnCaseBoolExp
-          scalarCompFieldsWithColCaseBoolExp = spiScalarComputedFields $> Just columnCaseBoolExp
+      let colsWithRedactionExp = spiCols $> RedactIfFalse spiFilter
+          scalarCompFieldsWithRedactionExp = spiComputedFields $> RedactIfFalse spiFilter
        in CombinedSelPermInfo
-            [colsWithColCaseBoolExp]
-            [scalarCompFieldsWithColCaseBoolExp]
+            [colsWithRedactionExp]
+            [scalarCompFieldsWithRedactionExp]
             [spiFilter]
             (Max <$> spiLimit)
             (Any spiAllowAgg)
             spiRequiredHeaders
+            spiAllowedQueryRootFields
+            spiAllowedSubscriptionRootFields
 
 -- | `OnlyRelevantEq` is a type class to implement checking if
 --   two types have the relevant info of a type equal. This typeclass is almost
@@ -116,184 +121,255 @@ rolePermInfoToCombineRolePermInfo RolePermInfo {..} =
 --   as (if needed)
 --
 --   instance OnlyRelevantEq a where
---     relevantEq = (==)
+--     (==~) = (==)
 --
 --   NOTE: Do not export this type class from this module, as it is only intended to be used in
 --   the context of inherited roles. If you think this typeclass fits your use case, then please
 --   discuss this with Karthikeyan or in Slack thread to make this a generic typeclass.
 class OnlyRelevantEq a where
-  relevantEq :: a -> a -> Bool
+  infix 4 ==~ -- same as (==)
+  (==~) :: a -> a -> Bool
 
-instance (Backend b, Eq a, Hashable a) => OnlyRelevantEq (GBoolExp b a) where
-  BoolAnd boolExpL `relevantEq` BoolAnd boolExpR = Set.fromList boolExpL == Set.fromList boolExpR
-  BoolOr boolExpL `relevantEq` BoolOr boolExpR = Set.fromList boolExpL == Set.fromList boolExpR
-  BoolNot boolExpL `relevantEq` BoolNot boolExpR = boolExpL == boolExpR
-  BoolExists boolExpL `relevantEq` BoolExists boolExpR = boolExpL == boolExpR
-  BoolFld boolExpL `relevantEq` BoolFld boolExpR = boolExpL == boolExpR
-  _ `relevantEq` _ = False
+instance (Backend b, Hashable a) => OnlyRelevantEq (GBoolExp b a) where
+  BoolAnd boolExpL ==~ BoolAnd boolExpR = Set.fromList boolExpL == Set.fromList boolExpR
+  BoolOr boolExpL ==~ BoolOr boolExpR = Set.fromList boolExpL == Set.fromList boolExpR
+  BoolNot boolExpL ==~ BoolNot boolExpR = boolExpL == boolExpR
+  BoolExists boolExpL ==~ BoolExists boolExpR = boolExpL == boolExpR
+  BoolField boolExpL ==~ BoolField boolExpR = boolExpL == boolExpR
+  _ ==~ _ = False
 
-instance (Backend b, Eq a, Eq (BooleanOperators b a)) => OnlyRelevantEq (AnnComputedFieldBoolExp b a) where
-  relevantEq = (==)
+instance
+  ( Eq (AnnComputedFieldBoolExp b a)
+  ) =>
+  OnlyRelevantEq (AnnComputedFieldBoolExp b a)
+  where
+  (==~) = (==)
 
-instance (Backend b, Hashable a, Eq a, Hashable (BooleanOperators b a), Eq (BooleanOperators b a)) => OnlyRelevantEq (AnnBoolExpFld b a) where
-  annBoolExpFldL `relevantEq` annBoolExpFldR =
+instance
+  ( Backend b,
+    Hashable (OpExpG b a),
+    OnlyRelevantEq (AnnBoolExp b a),
+    OnlyRelevantEq (AnnComputedFieldBoolExp b a)
+  ) =>
+  OnlyRelevantEq (AnnBoolExpFld b a)
+  where
+  annBoolExpFldL ==~ annBoolExpFldR =
     case (annBoolExpFldL, annBoolExpFldR) of
-      (AVColumn colInfoL opExpsL, AVColumn colInfoR opExpsR) ->
-        colInfoL == colInfoR && Set.fromList opExpsL == Set.fromList opExpsR
-      (AVRelationship relInfoL annBoolExpL, AVRelationship relInfoR annBoolExpR) ->
-        relInfoL == relInfoR && annBoolExpL `relevantEq` annBoolExpR
+      (AVColumn colInfoL redactionExpL opExpsL, AVColumn colInfoR redactionExpR opExpsR) ->
+        colInfoL == colInfoR && Set.fromList opExpsL == Set.fromList opExpsR && redactionExpL ==~ redactionExpR
+      (AVRelationship relInfoL (RelationshipFilters permsL annBoolExpL), AVRelationship relInfoR (RelationshipFilters permsR annBoolExpR)) ->
+        relInfoL == relInfoR && annBoolExpL ==~ annBoolExpR && permsL ==~ permsR
       (AVComputedField annCompFldBoolExpL, AVComputedField annCompFldBoolExpR) ->
-        annCompFldBoolExpL `relevantEq` annCompFldBoolExpR
+        annCompFldBoolExpL ==~ annCompFldBoolExpR
       (_, _) -> False
 
 instance
   ( Backend b,
-    Eq (BooleanOperators b (PartialSQLExp b)),
-    Hashable (BooleanOperators b (PartialSQLExp b))
+    OnlyRelevantEq (AnnBoolExpPartialSQL b)
   ) =>
   OnlyRelevantEq (InsPermInfo b)
   where
-  (InsPermInfo colsL checkL setL backendOnlyL reqHeadersL)
-    `relevantEq` (InsPermInfo colsR checkR setR backendOnlyR reqHeadersR) =
-      colsL == colsR
-        && checkL `relevantEq` checkR
-        && setL == setR
-        && backendOnlyL == backendOnlyR
-        && reqHeadersL == reqHeadersR
+  (InsPermInfo colsL checkL setL backendOnlyL reqHeadersL validateInputL)
+    ==~ (InsPermInfo colsR checkR setR backendOnlyR reqHeadersR validateInputR) =
+      colsL
+        == colsR
+        && checkL
+        ==~ checkR
+        && setL
+        == setR
+        && backendOnlyL
+        == backendOnlyR
+        && reqHeadersL
+        == reqHeadersR
+        && validateInputL
+        == validateInputR
 
 instance
   ( Backend b,
-    Eq (BooleanOperators b (PartialSQLExp b)),
-    Hashable (BooleanOperators b (PartialSQLExp b))
+    OnlyRelevantEq (AnnBoolExpPartialSQL b)
   ) =>
   OnlyRelevantEq (UpdPermInfo b)
   where
-  (UpdPermInfo colsL tableL filterL checkL setL reqHeadersL)
-    `relevantEq` (UpdPermInfo colsR tableR filterR checkR setR reqHeadersR) =
-      colsL == colsR
-        && tableL == tableR
-        && filterL `relevantEq` filterR
-        && checkL `relevantEq` checkR
-        && setL == setR
-        && reqHeadersL == reqHeadersR
+  (UpdPermInfo colsL tableL filterL checkL setL backendOnlyL reqHeadersL validateInputL)
+    ==~ (UpdPermInfo colsR tableR filterR checkR setR backendOnlyR reqHeadersR validateInputR) =
+      colsL
+        == colsR
+        && tableL
+        == tableR
+        && filterL
+        ==~ filterR
+        && checkL
+        ==~ checkR
+        && setL
+        == setR
+        && backendOnlyL
+        == backendOnlyR
+        && reqHeadersL
+        == reqHeadersR
+        && validateInputL
+        == validateInputR
 
 instance
   ( Backend b,
-    Eq (BooleanOperators b (PartialSQLExp b)),
-    Hashable (BooleanOperators b (PartialSQLExp b))
+    OnlyRelevantEq (AnnBoolExpPartialSQL b)
   ) =>
   OnlyRelevantEq (DelPermInfo b)
   where
-  DelPermInfo tableL filterL reqHeadersL
-    `relevantEq` DelPermInfo tableR filterR reqHeadersR =
-      tableL == tableR
-        && filterL `relevantEq` filterR
-        && reqHeadersL == reqHeadersR
+  (DelPermInfo tableL filterL backendOnlyL reqHeadersL validateInputL)
+    ==~ (DelPermInfo tableR filterR backendOnlyR reqHeadersR validateInputR) =
+      tableL
+        == tableR
+        && filterL
+        ==~ filterR
+        && backendOnlyL
+        == backendOnlyR
+        && reqHeadersL
+        == reqHeadersR
+        && validateInputL
+        == validateInputR
 
 instance OnlyRelevantEq RemoteSchemaInputValueDefinition where
   RemoteSchemaInputValueDefinition defnL presetL
-    `relevantEq` RemoteSchemaInputValueDefinition defnR presetR =
-      defnL `relevantEq` defnR && presetL == presetR
+    ==~ RemoteSchemaInputValueDefinition defnR presetR =
+      defnL ==~ defnR && presetL == presetR
 
 instance OnlyRelevantEq RemoteSchemaIntrospection where
   RemoteSchemaIntrospection typeDefinitionsL
-    `relevantEq` RemoteSchemaIntrospection typeDefinitionsR =
-      sort (Map.elems typeDefinitionsL) `relevantEq` sort (Map.elems typeDefinitionsR)
+    ==~ RemoteSchemaIntrospection typeDefinitionsR =
+      sort (HashMap.elems typeDefinitionsL) ==~ sort (HashMap.elems typeDefinitionsR)
 
 instance OnlyRelevantEq IntrospectionResult where
   IntrospectionResult (RemoteSchemaIntrospection typeDefnsL) queryRootL mutationRootL subsRootL
-    `relevantEq` IntrospectionResult (RemoteSchemaIntrospection typeDefnsR) queryRootR mutationRootR subsRootR =
-      sort (Map.elems typeDefnsL) `relevantEq` sort (Map.elems typeDefnsR)
-        && queryRootL == queryRootR
-        && mutationRootL == mutationRootR
-        && subsRootL == subsRootR
+    ==~ IntrospectionResult (RemoteSchemaIntrospection typeDefnsR) queryRootR mutationRootR subsRootR =
+      sort (HashMap.elems typeDefnsL)
+        ==~ sort (HashMap.elems typeDefnsR)
+        && queryRootL
+        == queryRootR
+        && mutationRootL
+        == mutationRootR
+        && subsRootL
+        == subsRootR
 
 instance (OnlyRelevantEq a) => OnlyRelevantEq (Maybe a) where
-  relevantEq l r =
+  (==~) l r =
     case (l, r) of
-      (Just l', Just r') -> l' `relevantEq` r'
+      (Just l', Just r') -> l' ==~ r'
       (Nothing, Nothing) -> True
       _ -> False
 
 instance OnlyRelevantEq G.Name where
-  relevantEq = (==)
+  (==~) = (==)
 
-instance OnlyRelevantEq a => OnlyRelevantEq [a] where
-  l `relevantEq` r =
+instance (OnlyRelevantEq a) => OnlyRelevantEq [a] where
+  l ==~ r =
     (length r == length r)
-      && (all (== True) (zipWith relevantEq l r))
+      && and (zipWith (==~) l r)
 
 instance OnlyRelevantEq G.ScalarTypeDefinition where
   G.ScalarTypeDefinition _descL nameL directivesL
-    `relevantEq` G.ScalarTypeDefinition _descR nameR directivesR =
+    ==~ G.ScalarTypeDefinition _descR nameR directivesR =
       nameL == nameR && Set.fromList directivesL == Set.fromList directivesR
 
 instance (OnlyRelevantEq a, Ord a) => OnlyRelevantEq (G.FieldDefinition a) where
   G.FieldDefinition _descL nameL argumentsL typeL directivesL
-    `relevantEq` G.FieldDefinition _descR nameR argumentsR typeR directivesR =
-      nameL == nameR
-        && sort argumentsL `relevantEq` sort argumentsR
-        && typeL == typeR
-        && Set.fromList directivesL == Set.fromList directivesR
+    ==~ G.FieldDefinition _descR nameR argumentsR typeR directivesR =
+      nameL
+        == nameR
+        && sort argumentsL
+        ==~ sort argumentsR
+        && typeL
+        == typeR
+        && Set.fromList directivesL
+        == Set.fromList directivesR
 
 instance (OnlyRelevantEq a, Ord a) => OnlyRelevantEq (G.ObjectTypeDefinition a) where
   G.ObjectTypeDefinition _descL nameL implementsInterfacesL directivesL fieldDefnsL
-    `relevantEq` G.ObjectTypeDefinition _descR nameR implementsInterfacesR directivesR fieldDefnsR =
-      nameL == nameR
-        && Set.fromList implementsInterfacesL == Set.fromList implementsInterfacesR
-        && Set.fromList directivesL == Set.fromList directivesR
-        && sort fieldDefnsL `relevantEq` sort fieldDefnsR
+    ==~ G.ObjectTypeDefinition _descR nameR implementsInterfacesR directivesR fieldDefnsR =
+      nameL
+        == nameR
+        && Set.fromList implementsInterfacesL
+        == Set.fromList implementsInterfacesR
+        && Set.fromList directivesL
+        == Set.fromList directivesR
+        && sort fieldDefnsL
+        ==~ sort fieldDefnsR
 
 instance (OnlyRelevantEq a, Ord a) => OnlyRelevantEq (G.InterfaceTypeDefinition [G.Name] a) where
   G.InterfaceTypeDefinition _descL nameL directivesL fieldDefnsL possibleTypesL
-    `relevantEq` G.InterfaceTypeDefinition _descR nameR directivesR fieldDefnsR possibleTypesR =
-      nameL == nameR
-        && Set.fromList directivesL == Set.fromList directivesR
-        && sort fieldDefnsL `relevantEq` sort fieldDefnsR
-        && Set.fromList possibleTypesL == Set.fromList possibleTypesR
+    ==~ G.InterfaceTypeDefinition _descR nameR directivesR fieldDefnsR possibleTypesR =
+      nameL
+        == nameR
+        && Set.fromList directivesL
+        == Set.fromList directivesR
+        && sort fieldDefnsL
+        ==~ sort fieldDefnsR
+        && Set.fromList possibleTypesL
+        == Set.fromList possibleTypesR
 
 instance OnlyRelevantEq G.UnionTypeDefinition where
   G.UnionTypeDefinition _descL nameL directivesL membersL
-    `relevantEq` G.UnionTypeDefinition _descR nameR directivesR membersR =
-      nameL == nameR
-        && Set.fromList directivesL == Set.fromList directivesR
-        && Set.fromList membersL == Set.fromList membersR
+    ==~ G.UnionTypeDefinition _descR nameR directivesR membersR =
+      nameL
+        == nameR
+        && Set.fromList directivesL
+        == Set.fromList directivesR
+        && Set.fromList membersL
+        == Set.fromList membersR
 
 instance (OnlyRelevantEq a, Ord a) => OnlyRelevantEq (G.InputObjectTypeDefinition a) where
   G.InputObjectTypeDefinition _descL nameL directivesL defnsL
-    `relevantEq` G.InputObjectTypeDefinition _descR nameR directivesR defnsR =
-      nameL == nameR
-        && Set.fromList directivesL == Set.fromList directivesR
-        && sort defnsL `relevantEq` sort defnsR
+    ==~ G.InputObjectTypeDefinition _descR nameR directivesR defnsR =
+      nameL
+        == nameR
+        && Set.fromList directivesL
+        == Set.fromList directivesR
+        && sort defnsL
+        ==~ sort defnsR
 
 instance OnlyRelevantEq G.EnumValueDefinition where
   G.EnumValueDefinition _descL nameL directivesL
-    `relevantEq` G.EnumValueDefinition _descR nameR directivesR =
+    ==~ G.EnumValueDefinition _descR nameR directivesR =
       nameL == nameR && Set.fromList directivesL == Set.fromList directivesR
 
 instance OnlyRelevantEq G.EnumTypeDefinition where
   G.EnumTypeDefinition _descL nameL directivesL valueDefnsL
-    `relevantEq` G.EnumTypeDefinition _descR nameR directivesR valueDefnsR =
-      nameL == nameR
-        && Set.fromList directivesL == Set.fromList directivesR
-        && sort valueDefnsL `relevantEq` sort valueDefnsR
+    ==~ G.EnumTypeDefinition _descR nameR directivesR valueDefnsR =
+      nameL
+        == nameR
+        && Set.fromList directivesL
+        == Set.fromList directivesR
+        && sort valueDefnsL
+        ==~ sort valueDefnsR
 
 instance (OnlyRelevantEq a, Ord a) => OnlyRelevantEq (G.TypeDefinition [G.Name] a) where
-  G.TypeDefinitionScalar scalarDefnL `relevantEq` G.TypeDefinitionScalar scalarDefnR = scalarDefnL `relevantEq` scalarDefnR
-  G.TypeDefinitionObject objDefnL `relevantEq` G.TypeDefinitionObject objDefnR = objDefnL `relevantEq` objDefnR
-  G.TypeDefinitionInterface interfaceDefnL `relevantEq` G.TypeDefinitionInterface interfaceDefnR = interfaceDefnL `relevantEq` interfaceDefnR
-  G.TypeDefinitionUnion unionDefnL `relevantEq` G.TypeDefinitionUnion unionDefnR = unionDefnL `relevantEq` unionDefnR
-  G.TypeDefinitionEnum enumDefnL `relevantEq` G.TypeDefinitionEnum enumDefnR = enumDefnL `relevantEq` enumDefnR
-  G.TypeDefinitionInputObject inpObjDefnL `relevantEq` G.TypeDefinitionInputObject inpObjDefnR = inpObjDefnL `relevantEq` inpObjDefnR
-  _ `relevantEq` _ = False
+  G.TypeDefinitionScalar scalarDefnL ==~ G.TypeDefinitionScalar scalarDefnR = scalarDefnL ==~ scalarDefnR
+  G.TypeDefinitionObject objDefnL ==~ G.TypeDefinitionObject objDefnR = objDefnL ==~ objDefnR
+  G.TypeDefinitionInterface interfaceDefnL ==~ G.TypeDefinitionInterface interfaceDefnR = interfaceDefnL ==~ interfaceDefnR
+  G.TypeDefinitionUnion unionDefnL ==~ G.TypeDefinitionUnion unionDefnR = unionDefnL ==~ unionDefnR
+  G.TypeDefinitionEnum enumDefnL ==~ G.TypeDefinitionEnum enumDefnR = enumDefnL ==~ enumDefnR
+  G.TypeDefinitionInputObject inpObjDefnL ==~ G.TypeDefinitionInputObject inpObjDefnR = inpObjDefnL ==~ inpObjDefnR
+  _ ==~ _ = False
 
 instance OnlyRelevantEq G.InputValueDefinition where
   G.InputValueDefinition _descL nameL typeL defaultValueL directivesL
-    `relevantEq` G.InputValueDefinition _descR nameR typeR defaultValueR directivesR =
-      nameL == nameR
-        && typeL == typeR
-        && defaultValueL == defaultValueR
-        && Set.fromList directivesL == Set.fromList directivesR
+    ==~ G.InputValueDefinition _descR nameR typeR defaultValueR directivesR =
+      nameL
+        == nameR
+        && typeL
+        == typeR
+        && defaultValueL
+        == defaultValueR
+        && Set.fromList directivesL
+        == Set.fromList directivesR
+
+instance
+  (OnlyRelevantEq (GBoolExp b (AnnBoolExpFld b v))) =>
+  OnlyRelevantEq (AnnRedactionExp b v)
+  where
+  NoRedaction ==~ NoRedaction = True
+  NoRedaction ==~ RedactIfFalse {} = False
+  RedactIfFalse {} ==~ NoRedaction = False
+  RedactIfFalse bExpL ==~ RedactIfFalse bExpR = bExpL ==~ bExpR
 
 maybeToCheckPermission :: Maybe a -> CheckPermission a
 maybeToCheckPermission = maybe CPUndefined CPDefined
